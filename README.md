@@ -52,6 +52,8 @@ Local LLM
 | `max_tokens` 変換 | `max_tokens` を Ollama の `options.num_predict` に変換 |
 | Content 正規化 | OpenAI の content parts（配列形式）を plain text に正規化 |
 | ThreadingHTTPServer | 複数リクエストの同時処理に対応 |
+| タイムアウト設定 | Ollama への接続タイムアウト（30秒）、応答受信タイムアウト（6時間）を設定可能 |
+| Nginx 対応 | `X-Accel-Buffering: no` ヘッダを送出し、リバースプロキシ環境でもストリーミングが機能するよう配慮 |
 | 環境変数設定 | 接続先・待ち受け先を環境変数で柔軟に設定可能 |
 
 ### モデル指定について
@@ -69,10 +71,48 @@ Local LLM
 
 ## Requirements
 
-- Linux
+- Linux（systemd 搭載）
 - Python 3
+- curl
 - Ollama（起動済み）
 - OpenCode など OpenAI 互換 API クライアント
+
+## Quick Start (Using Scripts)
+
+`install.sh` / `uninstall.sh` を利用すると、GitHub からファイルをダウンロードして systemd サービスとして自動的にインストール・アンインストールできます。
+
+1. リポジトリからスクリプトをダウンロードします：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/uninstall.sh -o uninstall.sh
+```
+
+2. 実行権限を付与します：
+
+```bash
+chmod +x install.sh uninstall.sh
+```
+
+3. `sudo` でインストールスクリプトを実行します：
+
+```bash
+sudo ./install.sh
+```
+
+インストール時に、接続先・待ち受けポートなどの設定をインタラクティブに入力できます（Enter でデフォルト値を採用）。Ollama の動作確認、モデルの確認、ポート競合チェックが自動的に行われます。
+
+### アンインストール
+
+同様に `uninstall.sh` をダウンロード・実行権限付与した上で、`sudo` で実行します：
+
+```bash
+sudo ./uninstall.sh
+```
+
+サービス停止、ファイル削除、systemd のクリーンアップが自動的に行われます。既存の `override.conf` についてはホームディレクトリへのバックアップを取得するかどうか確認されます。
+
+> **注意**: スクリプトは root 権限が必要であり、`sudo` で実行してください。Ollama そのものはアンインストール対象外です。
 
 ## Configuration
 
@@ -87,6 +127,17 @@ Local LLM
 ### 内部接続動作
 
 プロキシは `OLLAMA_HOST` に `/api/chat` を付加して Ollama と通信します。例えば、`OLLAMA_HOST=http://localhost:11434` の場合、実際には `http://localhost:11434/api/chat` へリクエストを送信します。
+
+### タイムアウト設定
+
+Ollama への接続時に使用するタイムアウト値は以下の通りです。これらの値は現状環境変数で上書きできません。
+
+| 定数名 | 説明 | デフォルト値 |
+|--------|------|-------------|
+| `CONNECT_TIMEOUT` | Ollama への接続確立タイムアウト | 30秒 |
+| `READ_TIMEOUT` | Ollama からの応答受信タイムアウト | 6時間（21600秒） |
+
+長文生成や大規模な tool calling 処理に対応するため、応答受信のタイムアウト値は比較的大きな値に設定されています。
 
 ## Running
 
@@ -116,9 +167,15 @@ Ollama : http://127.0.0.1:11434/api/chat
 
 ## systemd Setup
 
-常時稼働させる場合は、systemd サービスとして運用できます。以下は一般的な設定例です。サービス名やパスは実環境に合わせて変更してください。
+### Automated installation (Recommended)
 
-### Main service file
+[Quick Start](#quick-start-using-scripts) の `install.sh` を利用すると、systemd サービスの作成・設定・起動が自動的に行われます。詳細な設計方針は [INSTALL.md](INSTALL.md)、[UNINSTALL.md](UNINSTALL.md) を参照してください。
+
+### Manual setup
+
+手動で systemd サービスを設定する場合、以下を参考にしてください。サービス名やパスは実環境に合わせて変更してください。
+
+#### Main service file
 
 `/etc/systemd/system/opencode-ollama-proxy.service`：
 
@@ -130,10 +187,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=<user>
-Group=<group>
-WorkingDirectory=/path/to/opencode-ollama-proxy
-ExecStart=/usr/bin/python3 /path/to/opencode-ollama-proxy/proxy.py
+User=root
+Group=root
+WorkingDirectory=/opt/opencode-ollama-proxy
+ExecStart=/usr/bin/python3 /opt/opencode-ollama-proxy/proxy.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
@@ -142,7 +199,7 @@ Environment=PYTHONUNBUFFERED=1
 WantedBy=multi-user.target
 ```
 
-### Environment override (drop-in)
+#### Environment override (drop-in)
 
 環境変数は drop-in で設定するのが推奨です。`/etc/systemd/system/opencode-ollama-proxy.service.d/override.conf`：
 
@@ -155,7 +212,7 @@ Environment="LISTEN_PORT=8000"
 
 > Ollama が別のマシンで動作している場合は `OLLAMA_HOST` を適切なアドレスに変更してください。
 
-### Service management
+#### Service management
 
 以下の例ではサービス名を `opencode-ollama-proxy` としています。実環境のサービス名に合わせて読み替えてください。
 
@@ -251,6 +308,19 @@ curl http://localhost:8000/v1/chat/completions \
     ]
   }'
 ```
+
+#### ストリーミング時のヘッダ仕様
+
+プロキシはストリーミング応答において以下の HTTP ヘッダを設定します：
+
+- `Content-Type: text/event-stream; charset=utf-8` — SSE 形式のコンテンツタイプを示す
+- `Cache-Control: no-cache` — クライアント側のキャッシュを無効化する
+- `Connection: close` — 応答完了後に接続を閉じる
+- `X-Accel-Buffering: no` — Nginx などのリバースプロキシがレスポンスをバッファリングしないよう指示する
+
+特に `X-Accel-Buffering: no` は、プロキシの手前に Nginx を配置している場合に、ストリーミング応答がリアルタイムでクライアントに配信されるようにするために必要です。このヘッダがないと Nginx がレスポンスをバッファリングし、ストリーミングの効果が失われる可能性があります。
+
+また、Ollama へのアップストリームリクエストでは、ストリーミング時の `Accept` ヘッダを `application/x-ndjson` に設定しています。これにより Ollama から行区切りの JSON（NDJSON）形式でストリーミングデータを受信します。非ストリーミング時は `application/json` が使用されます。
 
 出力例：
 
