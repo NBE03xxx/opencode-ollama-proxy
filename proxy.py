@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import os
 import time
 import uuid
 import traceback
@@ -13,10 +14,15 @@ from urllib.error import HTTPError, URLError
 # Configuration
 # ============================================================
 
-OLLAMA_URL = "http://192.168.1.253:11434/api/chat"
+OLLAMA_HOST = os.environ.get(
+    "OLLAMA_HOST",
+    "http://192.168.1.253:11434",
+)
 
-HOST = "0.0.0.0"
-PORT = 8000
+OLLAMA_URL = OLLAMA_HOST.rstrip("/") + "/api/chat"
+
+HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
+PORT = int(os.environ.get("LISTEN_PORT", "8000"))
 
 CONNECT_TIMEOUT = 30
 READ_TIMEOUT = 60 * 60 * 6  # 6 hours
