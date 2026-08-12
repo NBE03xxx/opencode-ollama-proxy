@@ -16,7 +16,7 @@ from urllib.error import HTTPError, URLError
 
 OLLAMA_HOST = os.environ.get(
     "OLLAMA_HOST",
-    "http://192.168.1.253:11434",
+    "http://127.0.0.1:11434",
 )
 
 OLLAMA_URL = OLLAMA_HOST.rstrip("/") + "/api/chat"

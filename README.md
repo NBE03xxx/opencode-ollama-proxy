@@ -1,9 +1,9 @@
 # OpenCode Ollama Proxy
 
-OpenCodeとOllamaの間に配置し、OpenAI互換APIの差異を吸収するための軽量なHTTPプロキシです。
+OpenAI互換APIクライアント（OpenCode など）から Ollama を利用するための軽量なHTTPプロキシです。
 
 ```text
-OpenCode
+OpenCode（OpenAI互換APIクライアント）
    ↓
 OpenCode Ollama Proxy
    ↓
@@ -14,22 +14,22 @@ Local LLM
 
 ## Overview
 
-OpenCodeからOllamaを直接利用する際、OpenAI互換APIの実装差異、特にTools / tool callingやthinkingに関する挙動が問題となる場合があります。
+OpenCode などの OpenAI 互換 API クライアントから Ollama を直接利用する場合、API の実装差異（Tools / tool calling、thinking、リクエスト/レスポンス形式など）が問題となることがあります。
 
-このプロジェクトでは、OpenCodeとOllamaの間にプロキシを配置し、APIリクエストとレスポンスを調整することで、ローカルLLMを開発エージェントから利用するための補助層として機能させます。
+このプロキシは、クライアントからの OpenAI 互換 API リクエストを Ollama の `/api/chat` 形式へ変換し、Ollama のレスポンスを OpenAI 互換形式へ変換して返すことで、API 間の差異を吸収します。
 
-このproxyはLLM推論そのものを行うものではありません。
+**役割はあくまで API 変換・調整層です。** LLM 推論そのものを行うものではありません。
 
-役割はあくまで、
+## Architecture
 
 ```text
 OpenCode
    │
-   │ OpenAI-compatible API
+   │ POST /v1/chat/completions (OpenAI-compatible)
    ▼
 proxy.py
    │
-   │ Ollama API
+   │ POST /api/chat (Ollama native)
    ▼
 Ollama
    │
@@ -37,140 +37,162 @@ Ollama
 Local LLM
 ```
 
-というAPI変換・調整層です。
+- クライアントは `POST /v1/chat/completions` に OpenAI 互換形式でリクエストを送信
+- プロキシが Ollama の `/api/chat` へ変換して転送
+- Ollama のレスポンスを OpenAI 互換形式へ変換してクライアントに返す
 
 ## Features
 
-* OpenAI互換API endpointの提供
-* Ollama APIへのリクエスト転送
-* streaming response対応
-* Ollamaのthinking機能に関する調整
-* 長時間のLLM処理を考慮したread timeout
-* `ThreadingHTTPServer`による複数リクエストへの対応
-* systemdによる常駐運用
+| 機能 | 説明 |
+|------|------|
+| `POST /v1/chat/completions` | OpenAI 互換の chat completions エンドポイント |
+| Streaming (SSE) | `stream: true` を指定すると Server-Sent Events でストリーミング応答 |
+| Tool calling | OpenAI 形式 ⇔ Ollama 形式の tool call 双方向変換 |
+| Thinking 制御 | リクエスト時に `"think": false` を設定（Qwen thinking の無効化） |
+| `max_tokens` 変換 | `max_tokens` を Ollama の `options.num_predict` に変換 |
+| Content 正規化 | OpenAI の content parts（配列形式）を plain text に正規化 |
+| ThreadingHTTPServer | 複数リクエストの同時処理に対応 |
+| 環境変数設定 | 接続先・待ち受け先を環境変数で柔軟に設定可能 |
+
+### モデル指定について
+
+**モデルはプロキシ側では固定しません。** API リクエストの `model` フィールドで指定したモデル名がそのまま Ollama へ渡されます。
+
+```json
+{
+  "model": "qwen3.6:27b-Q6",
+  "messages": [...]
+}
+```
+
+この設計により、プロキシの設定を変更せずに任意の Ollama モデルを切り替えて利用できます。
 
 ## Requirements
 
-* Linux
-* Python 3
-* Ollama
-* OpenCodeなどのOpenAI互換APIクライアント
+- Linux
+- Python 3
+- Ollama（起動済み）
+- OpenCode など OpenAI 互換 API クライアント
 
-## Current Configuration
+## Configuration
 
-現在のバージョンでは、接続先やモデル名、listen addressなどの設定値は `proxy.py` に固定されています。
+主要な接続・待ち受け設定は、環境変数で上書きできます。`proxy.py` 内には各設定のデフォルト値が存在し、環境変数が未設定の場合に使用されます。
 
-そのため、現時点では特定の環境を前提とした実装になっています。
+| 環境変数 | 説明 | デフォルト値 |
+|----------|------|-------------|
+| `OLLAMA_HOST` | Ollama サーバーの接続先（末尾に `/api/chat` が自動付加） | `http://127.0.0.1:11434` |
+| `LISTEN_HOST` | プロキシの待ち受けアドレス | `0.0.0.0` |
+| `LISTEN_PORT` | プロキシの待ち受けポート | `8000` |
 
-設定値の環境変数化は今後の改善項目です。
+### 内部接続動作
 
-## Tested Environment
-
-このプロジェクトは、ローカルAIコーディングエージェント環境の検証の一環として開発しました。
-
-検証時には、以下の構成で動作を確認しています。
-
-* OpenCode
-* Ollama
-* Qwen3.6:27B-Q6
-* Linux
-* AMD GPU / ROCm環境
-
-Qwen3.6:27B-Q6は検証時に使用したモデルであり、このproxy自体がQwen専用という意味ではありません。
+プロキシは `OLLAMA_HOST` に `/api/chat` を付加して Ollama と通信します。例えば、`OLLAMA_HOST=http://localhost:11434` の場合、実際には `http://localhost:11434/api/chat` へリクエストを送信します。
 
 ## Running
 
-proxy.pyを直接実行する場合：
+### Direct execution
 
 ```bash
 python3 proxy.py
 ```
 
-現在の検証環境では、proxyは `0.0.0.0:8000` で待ち受け、OllamaのAPIへリクエストを転送します。
+環境変数を指定して実行：
 
-Ollamaは通常、
-
-```text
-http://127.0.0.1:11434
+```bash
+OLLAMA_HOST=http://localhost:11434 LISTEN_PORT=8000 python3 proxy.py
 ```
 
-で動作します。
+起動時の出力例：
 
-## systemd
-
-検証環境では、最終的にproxyをsystemdサービスとして常時起動する構成にしました。
-
-サービスファイル：
-
-```text
-/etc/systemd/system/opencode-qwen-proxy.service
+```
+======================================================================
+OpenCode / Ollama proxy
+======================================================================
+Server : OpenCode/Ollama native tool-calling proxy
+Listen : http://0.0.0.0:8000
+Ollama : http://127.0.0.1:11434/api/chat
+======================================================================
 ```
 
-現在使用しているサービス定義の例：
+## systemd Setup
+
+常時稼働させる場合は、systemd サービスとして運用できます。以下は一般的な設定例です。サービス名やパスは実環境に合わせて変更してください。
+
+### Main service file
+
+`/etc/systemd/system/opencode-ollama-proxy.service`：
 
 ```ini
 [Unit]
-Description=OpenCode Qwen Ollama Proxy
+Description=OpenCode Ollama Proxy
 After=network-online.target ollama.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=user
-Group=user
-
-WorkingDirectory=/opt/opencode-qwen-proxy
-ExecStart=/usr/bin/python3 /opt/opencode-qwen-proxy/proxy.py
-
+User=<user>
+Group=<group>
+WorkingDirectory=/path/to/opencode-ollama-proxy
+ExecStart=/usr/bin/python3 /path/to/opencode-ollama-proxy/proxy.py
 Restart=always
 RestartSec=3
-
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-### Start
+### Environment override (drop-in)
 
-```bash
-sudo systemctl start opencode-qwen-proxy
+環境変数は drop-in で設定するのが推奨です。`/etc/systemd/system/opencode-ollama-proxy.service.d/override.conf`：
+
+```ini
+[Service]
+Environment="OLLAMA_HOST=http://127.0.0.1:11434"
+Environment="LISTEN_HOST=0.0.0.0"
+Environment="LISTEN_PORT=8000"
 ```
 
-### Enable at boot
+> Ollama が別のマシンで動作している場合は `OLLAMA_HOST` を適切なアドレスに変更してください。
+
+### Service management
+
+以下の例ではサービス名を `opencode-ollama-proxy` としています。実環境のサービス名に合わせて読み替えてください。
 
 ```bash
-sudo systemctl enable opencode-qwen-proxy
+# 有効化（自動起動）
+sudo systemctl enable opencode-ollama-proxy
+
+# 開始
+sudo systemctl start opencode-ollama-proxy
+
+# 設定変更後の再起動
+sudo systemctl daemon-reload
+sudo systemctl restart opencode-ollama-proxy
+
+# 状態確認
+systemctl status opencode-ollama-proxy
+
+# ログ確認
+journalctl -u opencode-ollama-proxy -f
 ```
 
-### Check status
+## API Usage
+
+### Endpoint
+
+プロキシは以下の OpenAI 互換エンドポイントを公開します：
+
+| Method | Path | 説明 |
+|--------|------|------|
+| `POST` | `/v1/chat/completions` | Chat completion（非ストリーム・ストリーム両対応） |
+
+その他のパスへのリクエストは `404 Not Found` で返ります。
+
+### Non-streaming request
 
 ```bash
-systemctl status opencode-qwen-proxy
-```
-
-### Check logs
-
-```bash
-journalctl -u opencode-qwen-proxy
-```
-
-Follow logs in real time:
-
-```bash
-journalctl -u opencode-qwen-proxy -f
-```
-
-> 上記のサービス名、配置先、ユーザー名などは今回の検証環境に合わせたものです。
-
-## Testing
-
-proxyが起動していることを確認したうえで、OpenAI互換APIとしてリクエストを送信できます。
-
-例：
-
-```bash
-curl http://<AI_SERVER>:8000/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen3.6:27b-Q6",
@@ -183,40 +205,136 @@ curl http://<AI_SERVER>:8000/v1/chat/completions \
   }'
 ```
 
-正常に動作すると、Ollamaで生成された応答がOpenAI互換形式で返ります。
+レスポンス（OpenAI 互換形式）：
 
-## Background
+```json
+{
+  "id": "chatcmpl-xxxxxxxxxxxxxxxx",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "qwen3.6:27b-Q6",
+  "system_fingerprint": "fp_ollama",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "こんにちは！..."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 50,
+    "total_tokens": 60
+  }
+}
+```
 
-このproxyは、ローカルAIコーディングエージェント環境の検証プロジェクトから生まれました。
+### Streaming request
 
-検証では、OpenCodeからOllamaを直接利用する構成を試したところ、OpenAI互換APIの実装差異が問題となりました。
+`stream: true` を指定すると Server-Sent Events (SSE) でストリーミング応答が返ります：
 
-そのため、OpenCodeとOllamaの間にAPI互換性を補助するproxyを配置し、実際の開発エージェント環境で動作を検証しました。
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -N \
+  -d '{
+    "model": "qwen3.6:27b-Q6",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "こんにちは。"
+      }
+    ]
+  }'
+```
 
-その後、このproxyを独立したコンポーネントとして利用できるよう、検証用リポジトリから分離しました。
+出力例：
+
+```
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1700000000,"model":"qwen3.6:27b-Q6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1700000000,"model":"qwen3.6:27b-Q6","choices":[{"index":0,"delta":{"content":"こんにちは"},"finish_reason":null}]}
+
+...
+
+data: [DONE]
+```
+
+### Tool calling
+
+OpenAI 互換の tool calling を使用できます。プロキシが OpenAI 形式と Ollama 形式の間で変換を行います：
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.6:27b-Q6",
+    "messages": [
+      {
+        "role": "user",
+        "content": "東京の天気は何ですか？"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get the current weather for a location.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string",
+                "description": "The city name"
+              }
+            },
+            "required": ["location"]
+          }
+        }
+      }
+    ]
+  }'
+```
+
+### Model specification
+
+モデルはプロキシの設定では固定せず、API リクエストの `model` フィールドで指定します。Ollama で読み込み済みの任意のモデル名を指定できます：
+
+```json
+{ "model": "qwen3.6:27b-Q6", ... }
+{ "model": "llama3.1:8b", ... }
+{ "model": "mistral:7b", ... }
+```
 
 ## Limitations
 
-現在のバージョンには以下の制限があります。
+- **特定 API 挙動への依存**：Ollama `/api/chat` の特定のレスポンス形式を前提としています
+- **クライアント互換性**：すべての OpenAI 互換 API クライアントで完全な動作を保証するものではありません
+- **認証機能なし**：認証、アクセス制御、TLS 終端は提供しません。プロキシは内部ネットワークでの利用を想定しています
+- **推論環境への依存**：推論性能や GPU 利用状況は Ollama、モデル、GPU、ドライバ環境に依存します
 
-* 設定値が `proxy.py` に固定されています。
-* 特定のOllama APIの挙動を前提としています。
-* すべてのOpenAI互換APIクライアントやサーバーで動作することを保証するものではありません。
-* 認証、アクセス制御、TLS終端などの機能は提供していません。
-* proxy自体はLLM推論を行いません。
+## Tested Environment
 
-推論性能やGPU性能は、Ollama、使用するモデル、GPU、ドライバ、ROCmなどの実行環境に依存します。
+以下の構成で動作を確認しています：
 
-## Future Improvements
+| コンポーネント | 値 |
+|---------------|-----|
+| クライアント | OpenCode |
+| バックエンド | Ollama |
+| モデル | Qwen3.6:27B-Q6 |
+| OS | Linux |
+| GPU | AMD / ROCm |
 
-今後、以下の改善を予定しています。
+> Qwen3.6:27B-Q6 は検証時に使用したモデルです。プロキシ自体が特定のモデル専用というわけではありません。
 
-* 接続先Ollamaサーバーの環境変数化
-* 使用モデルの環境変数化
-* listen address / portの環境変数化
-* 設定方法の整理
-* systemdサービス定義の汎用化
-* エラー処理およびログ出力の改善
+## Background
+
+このプロキシは、ローカル AI コーディングエージェント環境の検証プロジェクトから生まれました。OpenCode から Ollama を直接利用する構成で API 実装差異に起因する問題が発生したため、中間層として API 変換プロキシを開発しました。その後、独立したコンポーネントとして分離・公開しています。
 
 ## License
 
