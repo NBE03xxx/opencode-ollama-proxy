@@ -1,49 +1,92 @@
-# OpenCode Qwen Ollama Proxy
+# OpenCode Ollama Proxy
 
-OpenCodeとOllamaの間で、OpenAI互換APIの差異を吸収するために使用した軽量なプロキシです。
-
-## 目的
-
-今回の検証では、OpenCodeからOllamaを直接利用した際に、OpenAI互換APIの実装差異、特に **Tools / tool calling** に関する問題が発生しました。
-
-そのため、OpenCodeとOllamaを分離することを目的とするのではなく、
-
-* OpenCodeから受け取ったOpenAI互換APIリクエストを処理する
-* Ollamaが扱える形式に調整する
-* OllamaからのレスポンスをOpenCodeへ返す
-
-というAPI互換性の補助層としてproxyを配置しました。
-
-構成は次のとおりです。
-
-| コンポーネント        | 役割                |
-| -------------- | ----------------- |
-| OpenCode       | ローカル開発エージェント      |
-| proxy.py       | OpenAI互換APIの差異を吸収 |
-| Ollama         | LLM推論サーバー         |
-| Qwen3.6:27B-Q6 | 使用したローカルモデル       |
+OpenCodeとOllamaの間に配置し、OpenAI互換APIの差異を吸収するための軽量なHTTPプロキシです。
 
 ```text
 OpenCode
    ↓
-proxy.py
+OpenCode Ollama Proxy
    ↓
 Ollama
    ↓
-Qwen3.6:27B-Q6
+Local LLM
 ```
 
-## 配置
+## Overview
 
-今回の検証では、proxyはAIサーバー上に配置しました。
+OpenCodeからOllamaを直接利用する際、OpenAI互換APIの実装差異、特にTools / tool callingやthinkingに関する挙動が問題となる場合があります。
+
+このプロジェクトでは、OpenCodeとOllamaの間にプロキシを配置し、APIリクエストとレスポンスを調整することで、ローカルLLMを開発エージェントから利用するための補助層として機能させます。
+
+このproxyはLLM推論そのものを行うものではありません。
+
+役割はあくまで、
 
 ```text
-/opt/opencode-qwen-proxy/
-├── proxy.py
-└── ...
+OpenCode
+   │
+   │ OpenAI-compatible API
+   ▼
+proxy.py
+   │
+   │ Ollama API
+   ▼
+Ollama
+   │
+   ▼
+Local LLM
 ```
 
-proxyは `0.0.0.0:8000` で待ち受け、OllamaのAPIへリクエストを転送します。
+というAPI変換・調整層です。
+
+## Features
+
+* OpenAI互換API endpointの提供
+* Ollama APIへのリクエスト転送
+* streaming response対応
+* Ollamaのthinking機能に関する調整
+* 長時間のLLM処理を考慮したread timeout
+* `ThreadingHTTPServer`による複数リクエストへの対応
+* systemdによる常駐運用
+
+## Requirements
+
+* Linux
+* Python 3
+* Ollama
+* OpenCodeなどのOpenAI互換APIクライアント
+
+## Current Configuration
+
+現在のバージョンでは、接続先やモデル名、listen addressなどの設定値は `proxy.py` に固定されています。
+
+そのため、現時点では特定の環境を前提とした実装になっています。
+
+設定値の環境変数化は今後の改善項目です。
+
+## Tested Environment
+
+このプロジェクトは、ローカルAIコーディングエージェント環境の検証の一環として開発しました。
+
+検証時には、以下の構成で動作を確認しています。
+
+* OpenCode
+* Ollama
+* Qwen3.6:27B-Q6
+* Linux
+* AMD GPU / ROCm環境
+
+Qwen3.6:27B-Q6は検証時に使用したモデルであり、このproxy自体がQwen専用という意味ではありません。
+
+## Running
+
+proxy.pyを直接実行する場合：
+
+```bash
+python3 proxy.py
+```
+
+現在の検証環境では、proxyは `0.0.0.0:8000` で待ち受け、OllamaのAPIへリクエストを転送します。
 
 Ollamaは通常、
 
@@ -53,19 +96,9 @@ http://127.0.0.1:11434
 
 で動作します。
 
-## 主な役割
+## systemd
 
-proxyでは、OpenCodeとOllamaの間で発生したAPI上の差異を吸収します。
-
-今回の環境では特に、Ollamaのthinking機能についてOpenCodeとの組み合わせを調整し、推論リクエストを安定して処理できるようにしました。
-
-また、長時間のLLM処理を考慮して、通常の短いHTTPリクエストより長い読み取りタイムアウトを設定しています。
-
-さらに、複数のリクエストを処理できるよう `ThreadingHTTPServer` を使用しています。
-
-## systemdによるサービス化
-
-検証の途中では手動でproxyを起動していましたが、最終的にはsystemdサービスとして常時起動する構成にしました。
+検証環境では、最終的にproxyをsystemdサービスとして常時起動する構成にしました。
 
 サービスファイル：
 
@@ -73,7 +106,7 @@ proxyでは、OpenCodeとOllamaの間で発生したAPI上の差異を吸収し�
 /etc/systemd/system/opencode-qwen-proxy.service
 ```
 
-主な設定は次のとおりです。
+現在使用しているサービス定義の例：
 
 ```ini
 [Unit]
@@ -98,62 +131,39 @@ Environment=PYTHONUNBUFFERED=1
 WantedBy=multi-user.target
 ```
 
-### 起動
+### Start
 
 ```bash
 sudo systemctl start opencode-qwen-proxy
 ```
 
-### 自動起動
+### Enable at boot
 
 ```bash
 sudo systemctl enable opencode-qwen-proxy
 ```
 
-### 状態確認
+### Check status
 
 ```bash
 systemctl status opencode-qwen-proxy
 ```
 
-### ログ確認
+### Check logs
 
 ```bash
 journalctl -u opencode-qwen-proxy
 ```
 
-リアルタイムで確認する場合：
+Follow logs in real time:
 
 ```bash
 journalctl -u opencode-qwen-proxy -f
 ```
 
-## Ollamaとの関係
+> 上記のサービス名、配置先、ユーザー名などは今回の検証環境に合わせたものです。
 
-proxyはOllamaそのものを置き換えるものではありません。
-
-役割はあくまで、
-
-```text
-OpenCode
-   │
-   │ OpenAI互換API
-   ▼
-proxy.py
-   │
-   │ Ollama API
-   ▼
-Ollama
-   │
-   ▼
-Qwen3.6:27B-Q6
-```
-
-というAPI変換・調整層です。
-
-そのため、Ollama単体でも利用できます。
-
-## 動作確認
+## Testing
 
 proxyが起動していることを確認したうえで、OpenAI互換APIとしてリクエストを送信できます。
 
@@ -175,21 +185,41 @@ curl http://<AI_SERVER>:8000/v1/chat/completions \
 
 正常に動作すると、Ollamaで生成された応答がOpenAI互換形式で返ります。
 
-## 今回の検証での位置付け
+## Background
 
-このproxyは、LLMそのものの性能を向上させるために導入したものではありません。
+このproxyは、ローカルAIコーディングエージェント環境の検証プロジェクトから生まれました。
 
-今回の目的は、ローカルLLMをOpenCodeなどの開発エージェントから実用的に利用できるかを確認することでした。
+検証では、OpenCodeからOllamaを直接利用する構成を試したところ、OpenAI互換APIの実装差異が問題となりました。
 
-その過程で、OpenCodeとOllamaを直接接続した場合のOpenAI互換APIの差異が問題となったため、proxyを導入しました。
+そのため、OpenCodeとOllamaの間にAPI互換性を補助するproxyを配置し、実際の開発エージェント環境で動作を検証しました。
 
-したがって、今回の最終構成ではproxyも含めて評価しています。
+その後、このproxyを独立したコンポーネントとして利用できるよう、検証用リポジトリから分離しました。
 
-## 注意点
+## Limitations
 
-このproxyは今回の環境に合わせた検証用の実装です。
+現在のバージョンには以下の制限があります。
 
-特定のAPI仕様やOllamaの挙動を前提としているため、すべてのOpenAI互換APIサーバーでそのまま利用できることを保証するものではありません。
+* 設定値が `proxy.py` に固定されています。
+* 特定のOllama APIの挙動を前提としています。
+* すべてのOpenAI互換APIクライアントやサーバーで動作することを保証するものではありません。
+* 認証、アクセス制御、TLS終端などの機能は提供していません。
+* proxy自体はLLM推論を行いません。
 
-また、proxy自体はLLM推論を行いません。推論性能やGPU性能はOllamaおよび使用するモデル、GPU、ROCm環境に依存します。
+推論性能やGPU性能は、Ollama、使用するモデル、GPU、ドライバ、ROCmなどの実行環境に依存します。
 
+## Future Improvements
+
+今後、以下の改善を予定しています。
+
+* 接続先Ollamaサーバーの環境変数化
+* 使用モデルの環境変数化
+* listen address / portの環境変数化
+* 設定方法の整理
+* systemdサービス定義の汎用化
+* エラー処理およびログ出力の改善
+
+## License
+
+This project is licensed under the MIT License.
+
+See [LICENSE](LICENSE) for details.
