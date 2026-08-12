@@ -69,59 +69,10 @@ Local LLM
 
 ## Requirements
 
-- Linux (systemd-based distribution)
+- Linux
 - Python 3
-- curl
 - Ollama（起動済み）
 - OpenCode など OpenAI 互換 API クライアント
-
-## Installation
-
-### Automatic installation (Recommended)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/install.sh | sh
-```
-
-This installs the proxy to `/opt/opencode-qwen-proxy` and sets up a systemd service named `opencode-ollama-proxy`. The installer is idempotent and can be safely re-run for updates.
-
-The installer will:
-
-1. Check required dependencies (curl, python3, systemctl)
-2. Verify Ollama availability at the configured endpoint
-3. Download project files from GitHub to `/opt/opencode-qwen-proxy`
-4. Install systemd service unit file
-5. Create default environment variable override with recommended values
-6. Start and enable the service
-
-**The installer does NOT install Ollama.** Ollama must be installed separately beforehand.
-
-### Updating
-
-Run the same command again to update:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/install.sh | sh
-```
-
-Existing configuration in your systemd drop-in override is preserved across updates.
-
-### Manual installation
-
-See [systemd Setup](#systemd-setup) below for manual setup instructions.
-
-## Uninstallation
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/uninstall.sh | sh
-```
-
-This removes the service and project files. **Ollama and its models are NOT removed.**
-
-> If you chose to keep your `override.conf` during uninstallation, you can remove it manually with:
-> ```bash
-> sudo rm -rf /etc/systemd/system/opencode-ollama-proxy.service.d
-> ```
 
 ## Configuration
 
@@ -165,13 +116,11 @@ Ollama : http://127.0.0.1:11434/api/chat
 
 ## systemd Setup
 
-The automatic installer handles systemd setup. For manual installation or understanding the configuration, see below.
-
-The service name is `opencode-ollama-proxy`.
+常時稼働させる場合は、systemd サービスとして運用できます。以下は一般的な設定例です。サービス名やパスは実環境に合わせて変更してください。
 
 ### Main service file
 
-`/etc/systemd/system/opencode-ollama-proxy.service`:
+`/etc/systemd/system/opencode-ollama-proxy.service`：
 
 ```ini
 [Unit]
@@ -181,14 +130,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/opencode-qwen-proxy
-ExecStart=/usr/bin/python3 /opt/opencode-qwen-proxy/proxy.py
+User=<user>
+Group=<group>
+WorkingDirectory=/path/to/opencode-ollama-proxy
+ExecStart=/usr/bin/python3 /path/to/opencode-ollama-proxy/proxy.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=opencode-ollama-proxy
 
 [Install]
 WantedBy=multi-user.target
@@ -196,13 +144,7 @@ WantedBy=multi-user.target
 
 ### Environment override (drop-in)
 
-The recommended way to set environment variables is via a systemd drop-in override. This method preserves your settings across updates:
-
-```bash
-sudo systemctl edit opencode-ollama-proxy
-```
-
-This creates or edits `/etc/systemd/system/opencode-ollama-proxy.service.d/override.conf`. Add the following:
+環境変数は drop-in で設定するのが推奨です。`/etc/systemd/system/opencode-ollama-proxy.service.d/override.conf`：
 
 ```ini
 [Service]
@@ -211,32 +153,27 @@ Environment="LISTEN_HOST=0.0.0.0"
 Environment="LISTEN_PORT=8000"
 ```
 
-> If Ollama is running on a different machine, change `OLLAMA_HOST` to the appropriate address.
-
-After editing, apply the changes:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart opencode-ollama-proxy
-```
+> Ollama が別のマシンで動作している場合は `OLLAMA_HOST` を適切なアドレスに変更してください。
 
 ### Service management
 
+以下の例ではサービス名を `opencode-ollama-proxy` としています。実環境のサービス名に合わせて読み替えてください。
+
 ```bash
-# Enable (auto-start at boot)
+# 有効化（自動起動）
 sudo systemctl enable opencode-ollama-proxy
 
-# Start
+# 開始
 sudo systemctl start opencode-ollama-proxy
 
-# Restart after configuration changes
+# 設定変更後の再起動
 sudo systemctl daemon-reload
 sudo systemctl restart opencode-ollama-proxy
 
-# Check status
+# 状態確認
 systemctl status opencode-ollama-proxy
 
-# View logs
+# ログ確認
 journalctl -u opencode-ollama-proxy -f
 ```
 
