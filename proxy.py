@@ -1697,6 +1697,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         created_at = now_unix()
         msg_item_id = "msg_" + uuid.uuid4().hex[:16]
         msg_item_created = False
+        content_part_sent = False
         total_prompt_tokens = 0
         total_completion_tokens = 0
         saw_tool_call = False
@@ -1766,16 +1767,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         })
                         msg_item_created = True
 
-                    sse_event("response.content_part.added", {
-                        "item_id": msg_item_id,
-                        "output_index": output_index,
-                        "content_index": 0,
-                        "part": {
-                            "type": "output_text",
-                            "text": "",
-                            "annotations": [],
-                        }
-                    })
+                    if not content_part_sent:
+                        sse_event("response.content_part.added", {
+                            "item_id": msg_item_id,
+                            "output_index": output_index,
+                            "content_index": 0,
+                            "part": {
+                                "type": "output_text",
+                                "text": "",
+                                "annotations": [],
+                            }
+                        })
+                        content_part_sent = True
 
                     sse_event("response.output_text.delta", {
                         "item_id": msg_item_id,
