@@ -273,7 +273,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
 
-        if self.path != "/v1/chat/completions":
+        if self.path == "/v1/chat/completions":
+            self._dispatch("/v1/chat/completions", self.handle_chat_completion)
+        elif self.path == "/v1/responses":
+            self._dispatch("/v1/responses", self.handle_responses)
+        else:
             self.send_json_headers(404)
             self.wfile.write(
                 json_bytes(
@@ -283,18 +287,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     )
                 )
             )
-            return
+
+    def _dispatch(self, path, handler):
 
         ProxyHandler.request_counter += 1
         request_no = ProxyHandler.request_counter
 
         print()
         print("=" * 70)
-        print(f"Request #{request_no}")
+        print(f"Request #{request_no} [{path}]")
         print("=" * 70)
 
         try:
-            self.handle_chat_completion(request_no)
+            handler(request_no)
 
         except BrokenPipeError:
             print("[WARN] Client disconnected")
@@ -319,6 +324,60 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     )
             except Exception:
                 pass
+
+    # --------------------------------------------------------
+    # GET
+    # --------------------------------------------------------
+
+    def do_GET(self):
+
+        if self.path == "/v1/models":
+            self.handle_models()
+        elif self.path in ("/health", "/v1/health"):
+            self.send_json_headers(200)
+            self.wfile.write(json_bytes({"status": "ok"}))
+        else:
+            self.send_json_headers(404)
+            self.wfile.write(
+                json_bytes(
+                    openai_error(
+                        "Not found",
+                        "not_found",
+                    )
+                )
+            )
+
+    def handle_models(self):
+
+        try:
+            req = Request(
+                OLLAMA_HOST.rstrip("/") + "/api/tags",
+                method="GET",
+            )
+            with urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+            models = []
+            for m in data.get("models", []):
+                name = m.get("name", "")
+                if name:
+                    models.append({
+                        "id": name,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "ollama",
+                    })
+
+            self.send_json_headers(200)
+            self.wfile.write(json_bytes({
+                "object": "list",
+                "data": models,
+            }))
+
+        except Exception as e:
+            print(f"[ERROR] /v1/models: {e}")
+            self.send_json_headers(502)
+            self.wfile.write(json_bytes(openai_error(str(e), "upstream_error")))
 
     # --------------------------------------------------------
     # Chat completion
@@ -1257,6 +1316,591 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 f"Request #{request_no} "
                 f"{elapsed:.3f}s"
             )
+
+
+    # ========================================================
+    # Responses API (OpenAI /v1/responses)
+    # ========================================================
+
+    def handle_responses(self, request_no):
+
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length)
+
+        try:
+            body = json.loads(raw_body.decode("utf-8"))
+        except Exception as e:
+            self.send_json_headers(400)
+            self.wfile.write(json_bytes(openai_error(f"Invalid JSON: {e}", "invalid_request_error")))
+            return
+
+        model = body.get("model", "")
+        stream = bool(body.get("stream", False))
+        max_output_tokens = body.get("max_output_tokens")
+        instructions = body.get("instructions")
+        input_data = body.get("input", [])
+        tools = body.get("tools")
+        tool_choice = body.get("tool_choice")
+
+        print()
+        print("[Responses Request Parameters]")
+        print(f"model = {model}")
+        print(f"stream = {stream}")
+        print(f"max_output_tokens = {max_output_tokens}")
+        print(f"input items = {len(input_data) if isinstance(input_data, list) else 1}")
+        print(f"tools = {len(tools) if isinstance(tools, list) else 0}")
+        print(f"tool_choice = {tool_choice}")
+
+        messages = self._responses_input_to_messages(instructions, input_data)
+
+        if DEBUG:
+            for i, msg in enumerate(messages):
+                role = msg.get("role", "")
+                content = normalize_content(msg.get("content"))
+                print(f"\n[{i}] {role} {len(content)} chars")
+                preview = content[:300]
+                if len(content) > 300:
+                    preview += "..."
+                if preview:
+                    print("    " + preview.replace("\n", " "))
+                if msg.get("tool_calls"):
+                    print(f"    tool_calls = {len(msg['tool_calls'])}")
+                if role == "tool":
+                    print(f"    tool_call_id = {msg.get('tool_call_id')}")
+
+        ollama_messages = [convert_message_to_ollama(m) for m in messages]
+
+        ollama_body = {
+            "model": model,
+            "messages": ollama_messages,
+            "think": False,
+            "stream": stream,
+        }
+
+        tools_enabled = True
+        if tool_choice == "none":
+            tools_enabled = False
+
+        if isinstance(tools, list) and tools and tools_enabled:
+            ollama_tools = []
+            for t in tools:
+                if isinstance(t, dict) and t.get("type") == "function":
+                    ollama_tools.append(t)
+            if ollama_tools:
+                ollama_body["tools"] = ollama_tools
+
+        if tool_choice is not None:
+            if tool_choice == "auto":
+                pass
+            elif tool_choice == "none":
+                pass
+            elif isinstance(tool_choice, str) and tool_choice != "required":
+                pass
+            elif isinstance(tool_choice, dict):
+                if (
+                    tool_choice.get("type") == "function"
+                    and isinstance(tool_choice.get("function"), dict)
+                ):
+                    ollama_body["tool_choice"] = tool_choice
+
+        if max_output_tokens is not None:
+            try:
+                mt = int(max_output_tokens)
+                if mt > 0:
+                    ollama_body["options"] = {"num_predict": mt}
+            except (TypeError, ValueError):
+                pass
+
+        if DEBUG:
+            print()
+            print("[Ollama Request]")
+            try:
+                debug_body = json.dumps(ollama_body, ensure_ascii=False, indent=2)
+                print(debug_body[:8000])
+                if len(debug_body) > 8000:
+                    print("[... request log truncated ...]")
+            except Exception:
+                print("[WARN] Could not log request")
+
+        request_data = json_bytes(ollama_body)
+
+        upstream_request = Request(
+            OLLAMA_URL,
+            data=request_data,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": (
+                    "application/x-ndjson" if stream else "application/json"
+                ),
+            },
+            method="POST",
+        )
+
+        start_time = time.monotonic()
+
+        try:
+            upstream = urlopen(upstream_request, timeout=READ_TIMEOUT)
+        except HTTPError as e:
+            error_body = b""
+            try:
+                error_body = e.read()
+            except Exception:
+                pass
+            error_text = error_body.decode("utf-8", errors="replace")
+            print(f"[ERROR] Ollama HTTP {e.code}: {error_text}")
+            if stream:
+                self.send_sse_headers()
+                self.send_sse(openai_error(error_text, "upstream_error"))
+                self.send_done()
+            else:
+                self.send_json_headers(502)
+                self.wfile.write(json_bytes(openai_error(error_text, "upstream_error")))
+            return
+        except URLError as e:
+            print(f"[ERROR] Cannot connect to Ollama: {e}")
+            if stream:
+                self.send_sse_headers()
+                self.send_sse(openai_error(f"Cannot connect to Ollama: {e}", "connection_error"))
+                self.send_done()
+            else:
+                self.send_json_headers(502)
+                self.wfile.write(json_bytes(openai_error(f"Cannot connect to Ollama: {e}", "connection_error")))
+            return
+        except Exception as e:
+            print(f"[ERROR] Upstream connection error: {e}")
+            if stream:
+                self.send_sse_headers()
+                self.send_sse(openai_error(str(e), "connection_error"))
+                self.send_done()
+            else:
+                self.send_json_headers(502)
+                self.wfile.write(json_bytes(openai_error(str(e), "connection_error")))
+            return
+
+        if stream:
+            self.handle_responses_stream(upstream, model, start_time, request_no)
+        else:
+            self.handle_responses_non_stream(upstream, model, start_time, request_no)
+
+    def _responses_input_to_messages(self, instructions, input_data):
+
+        messages = []
+
+        if instructions:
+            messages.append({"role": "system", "content": instructions})
+
+        if isinstance(input_data, str):
+            messages.append({"role": "user", "content": input_data})
+            return messages
+
+        if not isinstance(input_data, list):
+            messages.append({"role": "user", "content": str(input_data)})
+            return messages
+
+        for item in input_data:
+            if isinstance(item, str):
+                messages.append({"role": "user", "content": item})
+                continue
+
+            if not isinstance(item, dict):
+                continue
+
+            item_type = item.get("type", "")
+
+            if item_type == "message":
+                role = item.get("role", "user")
+                content = self._responses_content_to_text(item.get("content"))
+                if role == "developer":
+                    role = "system"
+                messages.append({"role": role, "content": content})
+
+            elif item_type == "function_call":
+                call_id = item.get("call_id", "")
+                if not call_id:
+                    call_id = "call_" + uuid.uuid4().hex[:16]
+                name = item.get("name", "")
+                arguments = item.get("arguments", "{}")
+                if not isinstance(arguments, str):
+                    try:
+                        arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                    except Exception:
+                        arguments = "{}"
+                if not messages or messages[-1].get("role") != "assistant" or not messages[-1].get("tool_calls"):
+                    messages.append({"role": "assistant", "content": "", "tool_calls": []})
+                messages[-1].setdefault("tool_calls", []).append({
+                    "id": call_id,
+                    "type": "function",
+                    "index": len(messages[-1]["tool_calls"]) - 1,
+                    "function": {
+                        "name": name,
+                        "arguments": arguments,
+                    },
+                })
+
+            elif item_type == "function_call_output":
+                call_id = item.get("call_id", "")
+                output = item.get("output", "")
+                if not isinstance(output, str):
+                    try:
+                        output = json.dumps(output, ensure_ascii=False)
+                    except Exception:
+                        output = str(output)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output,
+                })
+
+            elif item_type == "reasoning":
+                continue
+
+            else:
+                content = item.get("content", "")
+                if isinstance(content, str) and content:
+                    messages.append({"role": "user", "content": content})
+
+        return messages
+
+    def _responses_content_to_text(self, content):
+
+        if content is None:
+            return ""
+
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    part_type = part.get("type", "")
+                    if part_type == "input_text":
+                        parts.append(part.get("text", ""))
+                    elif part_type == "output_text":
+                        parts.append(part.get("text", ""))
+                    elif part_type == "text":
+                        parts.append(part.get("text", ""))
+            return "".join(parts)
+
+        return str(content)
+
+    def handle_responses_non_stream(
+        self,
+        upstream,
+        model,
+        start_time,
+        request_no,
+    ):
+
+        raw = upstream.read()
+        elapsed = time.monotonic() - start_time
+
+        print()
+        print(f"[Responses Non-Stream] {len(raw)} bytes, {elapsed:.3f}s")
+
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            self.send_json_headers(502)
+            self.wfile.write(json_bytes(openai_error(f"Invalid Ollama JSON: {e}", "upstream_error")))
+            return
+
+        message = data.get("message", {})
+        if not isinstance(message, dict):
+            message = {}
+
+        content = message.get("content", "")
+        ollama_tool_calls = message.get("tool_calls", [])
+
+        output = []
+        tool_call_count = 0
+
+        if content:
+            output.append({
+                "type": "message",
+                "id": "msg_" + uuid.uuid4().hex[:16],
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": content,
+                        "annotations": [],
+                    }
+                ],
+            })
+
+        if isinstance(ollama_tool_calls, list):
+            for index, tc in enumerate(ollama_tool_calls):
+                if not isinstance(tc, dict):
+                    continue
+                function = tc.get("function", {})
+                if not isinstance(function, dict):
+                    function = {}
+                call_id = tc.get("id")
+                if not call_id:
+                    call_id = "call_" + uuid.uuid4().hex[:16]
+                name = function.get("name", "")
+                arguments = normalize_tool_arguments(function.get("arguments", {}))
+                output.append({
+                    "type": "function_call",
+                    "id": "fc_" + uuid.uuid4().hex[:16],
+                    "call_id": call_id,
+                    "status": "completed",
+                    "name": name,
+                    "arguments": arguments,
+                })
+                tool_call_count += 1
+
+        if tool_call_count > 0:
+            status = "completed"
+        else:
+            status = "completed"
+
+        usage = {
+            "input_tokens": data.get("prompt_eval_count", 0),
+            "output_tokens": data.get("eval_count", 0),
+            "total_tokens": data.get("prompt_eval_count", 0) + data.get("eval_count", 0),
+        }
+
+        response = {
+            "id": "resp_" + uuid.uuid4().hex[:16],
+            "object": "response",
+            "created_at": now_unix(),
+            "model": model,
+            "status": status,
+            "output": output,
+            "usage": usage,
+            "error": None,
+            "incomplete_details": None,
+        }
+
+        self.send_json_headers(200)
+        self.wfile.write(json_bytes(response))
+        self.wfile.flush()
+
+        print(f"[Complete] Responses #{request_no} {elapsed:.3f}s tool_calls={tool_call_count}")
+
+    def handle_responses_stream(
+        self,
+        upstream,
+        model,
+        start_time,
+        request_no,
+    ):
+
+        self.send_sse_headers()
+
+        response_id = "resp_" + uuid.uuid4().hex[:16]
+        created_at = now_unix()
+        msg_item_id = "msg_" + uuid.uuid4().hex[:16]
+        msg_item_created = False
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        saw_tool_call = False
+        output_index = 0
+
+        def sse_event(event_type, payload):
+            payload["type"] = event_type
+            self.send_sse(payload)
+
+        print()
+        print("[Responses Stream] started")
+
+        try:
+            sse_event("response.created", {
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_at,
+                    "model": model,
+                    "status": "in_progress",
+                    "output": [],
+                    "usage": None,
+                    "error": None,
+                }
+            })
+
+            while True:
+                line = upstream.readline()
+
+                if not line:
+                    break
+
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                try:
+                    data = json.loads(line.decode("utf-8"))
+                except Exception as e:
+                    print("[WARN] Invalid Ollama stream JSON:", e)
+                    continue
+
+                message = data.get("message", {})
+                if not isinstance(message, dict):
+                    message = {}
+
+                content = message.get("content", "")
+
+                if data.get("prompt_eval_count") is not None:
+                    total_prompt_tokens = data.get("prompt_eval_count", total_prompt_tokens)
+
+                if data.get("eval_count") is not None:
+                    total_completion_tokens = data.get("eval_count", total_completion_tokens)
+
+                if content:
+                    if not msg_item_created:
+                        sse_event("response.output_item.added", {
+                            "output_index": output_index,
+                            "item": {
+                                "type": "message",
+                                "id": msg_item_id,
+                                "status": "in_progress",
+                                "role": "assistant",
+                                "content": [],
+                            }
+                        })
+                        msg_item_created = True
+
+                    sse_event("response.content_part.added", {
+                        "item_id": msg_item_id,
+                        "output_index": output_index,
+                        "content_index": 0,
+                        "part": {
+                            "type": "output_text",
+                            "text": "",
+                            "annotations": [],
+                        }
+                    })
+
+                    sse_event("response.output_text.delta", {
+                        "item_id": msg_item_id,
+                        "output_index": output_index,
+                        "content_index": 0,
+                        "delta": content,
+                    })
+
+                tool_calls = message.get("tool_calls", [])
+
+                if isinstance(tool_calls, list):
+                    for index, tc in enumerate(tool_calls):
+                        if not isinstance(tc, dict):
+                            continue
+                        function = tc.get("function", {})
+                        if not isinstance(function, dict):
+                            function = {}
+                        call_id = tc.get("id")
+                        if not call_id:
+                            call_id = "call_" + uuid.uuid4().hex[:16]
+                        name = function.get("name", "")
+                        arguments = normalize_tool_arguments(function.get("arguments", {}))
+
+                        fc_item_id = "fc_" + uuid.uuid4().hex[:16]
+
+                        sse_event("response.output_item.added", {
+                            "output_index": output_index,
+                            "item": {
+                                "type": "function_call",
+                                "id": fc_item_id,
+                                "status": "in_progress",
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": "",
+                            }
+                        })
+
+                        sse_event("response.function_call_arguments.delta", {
+                            "item_id": fc_item_id,
+                            "output_index": output_index,
+                            "delta": arguments,
+                        })
+
+                        sse_event("response.function_call_arguments.done", {
+                            "item_id": fc_item_id,
+                            "output_index": output_index,
+                            "arguments": arguments,
+                        })
+
+                        sse_event("response.output_item.done", {
+                            "output_index": output_index,
+                            "item": {
+                                "type": "function_call",
+                                "id": fc_item_id,
+                                "status": "completed",
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": arguments,
+                            }
+                        })
+
+                        saw_tool_call = True
+                        output_index += 1
+                        print(f"[Responses Stream] tool_call: {name} {arguments}")
+
+                if data.get("done"):
+                    if msg_item_created:
+                        sse_event("response.output_item.done", {
+                            "output_index": output_index,
+                            "item": {
+                                "type": "message",
+                                "id": msg_item_id,
+                                "status": "completed",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "",
+                                        "annotations": [],
+                                    }
+                                ],
+                            }
+                        })
+
+                    usage = {
+                        "input_tokens": total_prompt_tokens,
+                        "output_tokens": total_completion_tokens,
+                        "total_tokens": total_prompt_tokens + total_completion_tokens,
+                    }
+
+                    sse_event("response.completed", {
+                        "response": {
+                            "id": response_id,
+                            "object": "response",
+                            "created_at": created_at,
+                            "model": model,
+                            "status": "completed",
+                            "output": [],
+                            "usage": usage,
+                            "error": None,
+                        }
+                    })
+
+                    break
+
+        except BrokenPipeError:
+            print("[WARN] Responses streaming client disconnected")
+
+        except Exception:
+            print("[ERROR] Responses streaming exception:")
+            traceback.print_exc()
+
+        finally:
+            try:
+                upstream.close()
+            except Exception:
+                pass
+
+            try:
+                self.send_done()
+            except Exception:
+                pass
+
+            elapsed = time.monotonic() - start_time
+            print(f"[Responses Stream] finished Request #{request_no} {elapsed:.3f}s")
 
 
 # ============================================================
