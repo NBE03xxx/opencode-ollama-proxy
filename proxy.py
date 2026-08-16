@@ -8,6 +8,7 @@ import traceback
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 
 
 # ============================================================
@@ -331,9 +332,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
 
-        if self.path == "/v1/models":
+        path = urlparse(self.path).path
+
+        if path == "/v1/models":
             self.handle_models()
-        elif self.path in ("/health", "/v1/health"):
+        elif path in ("/health", "/v1/health"):
             self.send_json_headers(200)
             self.wfile.write(json_bytes({"status": "ok"}))
         else:
@@ -1702,6 +1705,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         total_completion_tokens = 0
         saw_tool_call = False
         output_index = 0
+        response_text = ""
 
         def sse_event(event_type, payload):
             payload["type"] = event_type
@@ -1754,6 +1758,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     total_completion_tokens = data.get("eval_count", total_completion_tokens)
 
                 if content:
+                    response_text += content
+
                     if not msg_item_created:
                         sse_event("response.output_item.added", {
                             "output_index": output_index,
@@ -1856,7 +1862,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                 "content": [
                                     {
                                         "type": "output_text",
-                                        "text": "",
+                                        "text": response_text,
                                         "annotations": [],
                                     }
                                 ],
