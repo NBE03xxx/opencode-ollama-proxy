@@ -1575,10 +1575,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         arguments = "{}"
                 if not messages or messages[-1].get("role") != "assistant" or not messages[-1].get("tool_calls"):
                     messages.append({"role": "assistant", "content": "", "tool_calls": []})
+                index = len(messages[-1]["tool_calls"])
                 messages[-1].setdefault("tool_calls", []).append({
                     "id": call_id,
                     "type": "function",
-                    "index": len(messages[-1]["tool_calls"]) - 1,
+                    "index": index,
                     "function": {
                         "name": name,
                         "arguments": arguments,
