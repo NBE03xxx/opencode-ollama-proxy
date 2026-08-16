@@ -1589,103 +1589,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         return str(content)
 
-    def handle_responses_non_stream(
-        self,
-        upstream,
-        model,
-        start_time,
-        request_no,
-    ):
-
-        raw = upstream.read()
-        elapsed = time.monotonic() - start_time
-
-        print()
-        print(f"[Responses Non-Stream] {len(raw)} bytes, {elapsed:.3f}s")
-
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except Exception as e:
-            self.send_json_headers(502)
-            self.wfile.write(json_bytes(openai_error(f"Invalid Ollama JSON: {e}", "upstream_error")))
-            return
-
-        message = data.get("message", {})
-        if not isinstance(message, dict):
-            message = {}
-
-        content = message.get("content", "")
-        ollama_tool_calls = message.get("tool_calls", [])
-
-        output = []
-        tool_call_count = 0
-
-        if content:
-            output.append({
-                "type": "message",
-                "id": "msg_" + uuid.uuid4().hex[:16],
-                "status": "completed",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": content,
-                        "annotations": [],
-                    }
-                ],
-            })
-
-        if isinstance(ollama_tool_calls, list):
-            for index, tc in enumerate(ollama_tool_calls):
-                if not isinstance(tc, dict):
-                    continue
-                function = tc.get("function", {})
-                if not isinstance(function, dict):
-                    function = {}
-                call_id = tc.get("id")
-                if not call_id:
-                    call_id = "call_" + uuid.uuid4().hex[:16]
-                name = function.get("name", "")
-                arguments = normalize_tool_arguments(function.get("arguments", {}))
-                output.append({
-                    "type": "function_call",
-                    "id": "fc_" + uuid.uuid4().hex[:16],
-                    "call_id": call_id,
-                    "status": "completed",
-                    "name": name,
-                    "arguments": arguments,
-                })
-                tool_call_count += 1
-
-        if tool_call_count > 0:
-            status = "completed"
-        else:
-            status = "completed"
-
-        usage = {
-            "input_tokens": data.get("prompt_eval_count", 0),
-            "output_tokens": data.get("eval_count", 0),
-            "total_tokens": data.get("prompt_eval_count", 0) + data.get("eval_count", 0),
-        }
-
-        response = {
-            "id": "resp_" + uuid.uuid4().hex[:16],
-            "object": "response",
-            "created_at": now_unix(),
-            "model": model,
-            "status": status,
-            "output": output,
-            "usage": usage,
-            "error": None,
-            "incomplete_details": None,
-        }
-
-        self.send_json_headers(200)
-        self.wfile.write(json_bytes(response))
-        self.wfile.flush()
-
-        print(f"[Complete] Responses #{request_no} {elapsed:.3f}s tool_calls={tool_call_count}")
-
     def handle_responses_stream(
         self,
         upstream,
@@ -1698,37 +1601,61 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         response_id = "resp_" + uuid.uuid4().hex[:16]
         created_at = now_unix()
-        msg_item_id = "msg_" + uuid.uuid4().hex[:16]
-        msg_item_created = False
-        content_part_sent = False
+
         total_prompt_tokens = 0
         total_completion_tokens = 0
-        saw_tool_call = False
+
+        # Responses API output items.
+        #
+        # These are retained and included in response.completed.
+        response_output = []
+
+        # Current message output item.
+        message_item = None
+        message_item_id = None
+        message_content = ""
+
+        # Function-call state.
+        function_call_items = {}
+
         output_index = 0
-        response_text = ""
+
+        print()
+        print("[Responses Stream] started")
 
         def sse_event(event_type, payload):
             payload["type"] = event_type
             self.send_sse(payload)
 
-        print()
-        print("[Responses Stream] started")
-
         try:
-            sse_event("response.created", {
-                "response": {
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": created_at,
-                    "model": model,
-                    "status": "in_progress",
-                    "output": [],
-                    "usage": None,
-                    "error": None,
-                }
-            })
+
+            # ------------------------------------------------
+            # response.created
+            # ------------------------------------------------
+
+            sse_event(
+                "response.created",
+                {
+                    "response": {
+                        "id": response_id,
+                        "object": "response",
+                        "created_at": created_at,
+                        "model": model,
+                        "status": "in_progress",
+                        "output": [],
+                        "usage": None,
+                        "error": None,
+                        "incomplete_details": None,
+                    }
+                },
+            )
+
+            # ------------------------------------------------
+            # Read Ollama NDJSON stream
+            # ------------------------------------------------
 
             while True:
+
                 line = upstream.readline()
 
                 if not line:
@@ -1740,164 +1667,456 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     continue
 
                 try:
-                    data = json.loads(line.decode("utf-8"))
+                    data = json.loads(
+                        line.decode("utf-8")
+                    )
+
                 except Exception as e:
-                    print("[WARN] Invalid Ollama stream JSON:", e)
+                    print(
+                        "[WARN] Invalid Ollama "
+                        f"stream JSON: {e}"
+                    )
                     continue
 
-                message = data.get("message", {})
+                # ------------------------------------------------
+                # Usage
+                # ------------------------------------------------
+
+                if data.get("prompt_eval_count") is not None:
+                    total_prompt_tokens = data.get(
+                        "prompt_eval_count",
+                        total_prompt_tokens,
+                    )
+
+                if data.get("eval_count") is not None:
+                    total_completion_tokens = data.get(
+                        "eval_count",
+                        total_completion_tokens,
+                    )
+
+                message = data.get(
+                    "message",
+                    {},
+                )
+
                 if not isinstance(message, dict):
                     message = {}
 
-                content = message.get("content", "")
+                content = message.get(
+                    "content",
+                    "",
+                )
 
-                if data.get("prompt_eval_count") is not None:
-                    total_prompt_tokens = data.get("prompt_eval_count", total_prompt_tokens)
-
-                if data.get("eval_count") is not None:
-                    total_completion_tokens = data.get("eval_count", total_completion_tokens)
+                # ------------------------------------------------
+                # Assistant text
+                # ------------------------------------------------
 
                 if content:
-                    response_text += content
 
-                    if not msg_item_created:
-                        sse_event("response.output_item.added", {
-                            "output_index": output_index,
-                            "item": {
-                                "type": "message",
-                                "id": msg_item_id,
-                                "status": "in_progress",
-                                "role": "assistant",
-                                "content": [],
-                            }
-                        })
-                        msg_item_created = True
+                    # Create message output item once.
+                    if message_item is None:
 
-                    if not content_part_sent:
-                        sse_event("response.content_part.added", {
-                            "item_id": msg_item_id,
-                            "output_index": output_index,
+                        message_item_id = (
+                            "msg_"
+                            + uuid.uuid4().hex[:16]
+                        )
+
+                        message_item = {
+                            "type": "message",
+                            "id": message_item_id,
+                            "status": "in_progress",
+                            "role": "assistant",
+                            "content": [],
+                        }
+
+                        response_output.append(
+                            message_item
+                        )
+
+                        sse_event(
+                            "response.output_item.added",
+                            {
+                                "output_index": output_index,
+                                "item": message_item.copy(),
+                            },
+                        )
+
+                        sse_event(
+                            "response.content_part.added",
+                            {
+                                "item_id":
+                                    message_item_id,
+                                "output_index":
+                                    output_index,
+                                "content_index": 0,
+                                "part": {
+                                    "type":
+                                        "output_text",
+                                    "text": "",
+                                    "annotations": [],
+                                },
+                            },
+                        )
+
+                    message_content += content
+
+                    sse_event(
+                        "response.output_text.delta",
+                        {
+                            "item_id":
+                                message_item_id,
+                            "output_index":
+                                output_index,
                             "content_index": 0,
-                            "part": {
-                                "type": "output_text",
-                                "text": "",
-                                "annotations": [],
-                            }
-                        })
-                        content_part_sent = True
+                            "delta": content,
+                        },
+                    )
 
-                    sse_event("response.output_text.delta", {
-                        "item_id": msg_item_id,
-                        "output_index": output_index,
-                        "content_index": 0,
-                        "delta": content,
-                    })
+                # ------------------------------------------------
+                # Tool calls
+                # ------------------------------------------------
 
-                tool_calls = message.get("tool_calls", [])
+                tool_calls = message.get(
+                    "tool_calls",
+                    [],
+                )
 
                 if isinstance(tool_calls, list):
-                    for index, tc in enumerate(tool_calls):
-                        if not isinstance(tc, dict):
+
+                    for index, tc in enumerate(
+                        tool_calls
+                    ):
+
+                        if not isinstance(
+                            tc,
+                            dict,
+                        ):
                             continue
-                        function = tc.get("function", {})
-                        if not isinstance(function, dict):
+
+                        function = tc.get(
+                            "function",
+                            {},
+                        )
+
+                        if not isinstance(
+                            function,
+                            dict,
+                        ):
                             function = {}
+
+                        # ----------------------------------------
+                        # Preserve Ollama call ID.
+                        # ----------------------------------------
+
                         call_id = tc.get("id")
+
                         if not call_id:
-                            call_id = "call_" + uuid.uuid4().hex[:16]
-                        name = function.get("name", "")
-                        arguments = normalize_tool_arguments(function.get("arguments", {}))
+                            call_id = (
+                                "call_"
+                                + uuid.uuid4().hex[:16]
+                            )
 
-                        fc_item_id = "fc_" + uuid.uuid4().hex[:16]
+                        name = function.get(
+                            "name",
+                            "",
+                        )
 
-                        sse_event("response.output_item.added", {
-                            "output_index": output_index,
-                            "item": {
-                                "type": "function_call",
-                                "id": fc_item_id,
-                                "status": "in_progress",
-                                "call_id": call_id,
-                                "name": name,
-                                "arguments": "",
+                        arguments = (
+                            normalize_tool_arguments(
+                                function.get(
+                                    "arguments",
+                                    {},
+                                )
+                            )
+                        )
+
+                        # ----------------------------------------
+                        # Use one Responses item per call_id.
+                        # ----------------------------------------
+
+                        state = function_call_items.get(
+                            call_id
+                        )
+
+                        if state is None:
+
+                            fc_item_id = (
+                                "fc_"
+                                + uuid.uuid4().hex[:16]
+                            )
+
+                            state = {
+                                "id":
+                                    fc_item_id,
+                                "call_id":
+                                    call_id,
+                                "name":
+                                    name,
+                                "arguments":
+                                    "",
+                                "output_index":
+                                    output_index,
                             }
-                        })
 
-                        sse_event("response.function_call_arguments.delta", {
-                            "item_id": fc_item_id,
-                            "output_index": output_index,
-                            "delta": arguments,
-                        })
+                            function_call_items[
+                                call_id
+                            ] = state
 
-                        sse_event("response.function_call_arguments.done", {
-                            "item_id": fc_item_id,
-                            "output_index": output_index,
-                            "arguments": arguments,
-                        })
-
-                        sse_event("response.output_item.done", {
-                            "output_index": output_index,
-                            "item": {
-                                "type": "function_call",
-                                "id": fc_item_id,
-                                "status": "completed",
-                                "call_id": call_id,
-                                "name": name,
-                                "arguments": arguments,
+                            function_call_output = {
+                                "type":
+                                    "function_call",
+                                "id":
+                                    fc_item_id,
+                                "status":
+                                    "in_progress",
+                                "call_id":
+                                    call_id,
+                                "name":
+                                    name,
+                                "arguments":
+                                    "",
                             }
-                        })
 
-                        saw_tool_call = True
-                        output_index += 1
-                        print(f"[Responses Stream] tool_call: {name} {arguments}")
+                            response_output.append(
+                                function_call_output
+                            )
+
+                            sse_event(
+                                "response.output_item.added",
+                                {
+                                    "output_index":
+                                        output_index,
+                                    "item":
+                                        function_call_output.copy(),
+                                },
+                            )
+
+                            output_index += 1
+
+                            print(
+                                "[Responses Stream] "
+                                "tool_call started: "
+                                f"{name} "
+                                f"call_id={call_id}"
+                            )
+
+                        # ----------------------------------------
+                        # Arguments
+                        #
+                        # Ollama currently returns the complete
+                        # arguments object in one stream chunk.
+                        #
+                        # If arguments arrive repeatedly for the
+                        # same call, do not create another item.
+                        # ----------------------------------------
+
+                        if arguments:
+
+                            state["arguments"] = arguments
+
+                            # Update retained output item.
+                            for item in response_output:
+
+                                if (
+                                    item.get("type")
+                                    == "function_call"
+                                    and item.get("id")
+                                    == state["id"]
+                                ):
+                                    item["arguments"] = (
+                                        arguments
+                                    )
+                                    break
+
+                            sse_event(
+                                "response.function_call_arguments.delta",
+                                {
+                                    "item_id":
+                                        state["id"],
+                                    "output_index":
+                                        state["output_index"],
+                                    "delta":
+                                        arguments,
+                                },
+                            )
+
+                            sse_event(
+                                "response.function_call_arguments.done",
+                                {
+                                    "item_id":
+                                        state["id"],
+                                    "output_index":
+                                        state["output_index"],
+                                    "arguments":
+                                        arguments,
+                                },
+                            )
+
+                            # ------------------------------------
+                            # Complete function call item.
+                            # ------------------------------------
+
+                            for item in response_output:
+
+                                if (
+                                    item.get("type")
+                                    == "function_call"
+                                    and item.get("id")
+                                    == state["id"]
+                                ):
+                                    item["status"] = (
+                                        "completed"
+                                    )
+                                    break
+
+                            sse_event(
+                                "response.output_item.done",
+                                {
+                                    "output_index":
+                                        state["output_index"],
+                                    "item": {
+                                        "type":
+                                            "function_call",
+                                        "id":
+                                            state["id"],
+                                        "status":
+                                            "completed",
+                                        "call_id":
+                                            call_id,
+                                        "name":
+                                            name,
+                                        "arguments":
+                                            arguments,
+                                    },
+                                },
+                            )
+
+                            print(
+                                "[Responses Stream] "
+                                "tool_call completed: "
+                                f"{name} "
+                                f"arguments={arguments}"
+                            )
+
+                # ------------------------------------------------
+                # Ollama done
+                # ------------------------------------------------
 
                 if data.get("done"):
-                    if msg_item_created:
-                        sse_event("response.output_item.done", {
-                            "output_index": output_index,
-                            "item": {
-                                "type": "message",
-                                "id": msg_item_id,
-                                "status": "completed",
-                                "role": "assistant",
-                                "content": [
-                                    {
-                                        "type": "output_text",
-                                        "text": response_text,
-                                        "annotations": [],
-                                    }
-                                ],
+
+                    # --------------------------------------------
+                    # Complete assistant message if present.
+                    # --------------------------------------------
+
+                    if message_item is not None:
+
+                        message_item["status"] = (
+                            "completed"
+                        )
+
+                        message_item["content"] = [
+                            {
+                                "type":
+                                    "output_text",
+                                "text":
+                                    message_content,
+                                "annotations": [],
                             }
-                        })
+                        ]
+
+                        message_output_index = 0
+
+                        # Find the actual output index.
+                        for i, item in enumerate(
+                            response_output
+                        ):
+                            if (
+                                item.get("id")
+                                == message_item_id
+                            ):
+                                message_output_index = i
+                                break
+
+                        sse_event(
+                            "response.output_item.done",
+                            {
+                                "output_index":
+                                    message_output_index,
+                                "item":
+                                    message_item,
+                            },
+                        )
+
+                    # --------------------------------------------
+                    # Usage
+                    # --------------------------------------------
 
                     usage = {
-                        "input_tokens": total_prompt_tokens,
-                        "output_tokens": total_completion_tokens,
-                        "total_tokens": total_prompt_tokens + total_completion_tokens,
+                        "input_tokens":
+                            total_prompt_tokens,
+                        "output_tokens":
+                            total_completion_tokens,
+                        "total_tokens":
+                            (
+                                total_prompt_tokens
+                                + total_completion_tokens
+                            ),
                     }
 
-                    sse_event("response.completed", {
-                        "response": {
-                            "id": response_id,
-                            "object": "response",
-                            "created_at": created_at,
-                            "model": model,
-                            "status": "completed",
-                            "output": [],
-                            "usage": usage,
-                            "error": None,
-                        }
-                    })
+                    # --------------------------------------------
+                    # Final response
+                    #
+                    # IMPORTANT:
+                    # Do NOT return output=[].
+                    #
+                    # Codex needs the function_call item here.
+                    # --------------------------------------------
+
+                    sse_event(
+                        "response.completed",
+                        {
+                            "response": {
+                                "id":
+                                    response_id,
+                                "object":
+                                    "response",
+                                "created_at":
+                                    created_at,
+                                "model":
+                                    model,
+                                "status":
+                                    "completed",
+                                "output":
+                                    response_output,
+                                "usage":
+                                    usage,
+                                "error":
+                                    None,
+                                "incomplete_details":
+                                    None,
+                            }
+                        },
+                    )
 
                     break
 
         except BrokenPipeError:
-            print("[WARN] Responses streaming client disconnected")
+
+            print(
+                "[WARN] Responses streaming "
+                "client disconnected"
+            )
 
         except Exception:
-            print("[ERROR] Responses streaming exception:")
+
+            print(
+                "[ERROR] Responses streaming exception:"
+            )
+
             traceback.print_exc()
 
         finally:
+
             try:
                 upstream.close()
             except Exception:
@@ -1908,8 +2127,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-            elapsed = time.monotonic() - start_time
-            print(f"[Responses Stream] finished Request #{request_no} {elapsed:.3f}s")
+            elapsed = (
+                time.monotonic()
+                - start_time
+            )
+
+            print(
+                "[Responses Stream] finished "
+                f"Request #{request_no} "
+                f"{elapsed:.3f}s"
+            )
 
 
 # ============================================================
