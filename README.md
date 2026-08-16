@@ -123,6 +123,7 @@ sudo ./uninstall.sh
 | `OLLAMA_HOST` | Ollama サーバーの接続先（末尾に `/api/chat` が自動付加） | `http://127.0.0.1:11434` |
 | `LISTEN_HOST` | プロキシの待ち受けアドレス | `0.0.0.0` |
 | `LISTEN_PORT` | プロキシの待ち受けポート | `8000` |
+| `DEBUG` | `1` / `true` / `yes` を設定すると、リクエストメッセージのプレビューと Ollama 送信ボディの詳細ログを出力します。デフォルトでは出力されません | 無効 |
 
 ### 内部接続動作
 
@@ -134,7 +135,7 @@ Ollama への接続時に使用するタイムアウト値は以下の通りで�
 
 | 定数名 | 説明 | デフォルト値 |
 |--------|------|-------------|
-| `CONNECT_TIMEOUT` | Ollama への接続確立タイムアウト | 30秒 |
+| `CONNECT_TIMEOUT` | Ollama への接続確立タイムアウト（現在未使用） | 30秒 |
 | `READ_TIMEOUT` | Ollama からの応答受信タイムアウト | 6時間（21600秒） |
 
 長文生成や大規模な tool calling 処理に対応するため、応答受信のタイムアウト値は比較的大きな値に設定されています。
@@ -370,6 +371,16 @@ curl http://localhost:8000/v1/chat/completions \
     ]
   }'
 ```
+
+#### tool_choice の動作
+
+`tool_choice` には以下の値を指定できます：
+
+| 値 | 動作 |
+|----|------|
+| `"auto"` | Ollama に `tools` をそのまま渡し、モデルが判断します |
+| `"none"` | Ollama への `tools` を送信しません。モデルは関数を呼び出せなくなります |
+| `{"type": "function", "function": {"name": "..."}}` | Ollama に `tool_choice` をそのまま渡します（Ollama のバージョンにより対応状況が異なります） |
 
 ### Model specification
 

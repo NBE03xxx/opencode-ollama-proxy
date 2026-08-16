@@ -29,6 +29,8 @@ READ_TIMEOUT = 60 * 60 * 6  # 6 hours
 
 SERVER_NAME = "OpenCode/Ollama native tool-calling proxy"
 
+DEBUG = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
+
 
 # ============================================================
 # Utility
@@ -371,39 +373,40 @@ class ProxyHandler(BaseHTTPRequestHandler):
         # Log messages
         # ----------------------------------------------------
 
-        for i, msg in enumerate(messages):
+        if DEBUG:
+            for i, msg in enumerate(messages):
 
-            role = msg.get("role", "")
-            content = normalize_content(
-                msg.get("content")
-            )
-
-            print(
-                f"\n[{i}] {role} {len(content)} chars"
-            )
-
-            preview = content[:300]
-
-            if len(content) > 300:
-                preview += "..."
-
-            if preview:
-                print(
-                    "    "
-                    + preview.replace("\n", " ")
+                role = msg.get("role", "")
+                content = normalize_content(
+                    msg.get("content")
                 )
 
-            if msg.get("tool_calls"):
                 print(
-                    f"    tool_calls = "
-                    f"{len(msg['tool_calls'])}"
+                    f"\n[{i}] {role} {len(content)} chars"
                 )
 
-            if role == "tool":
-                print(
-                    f"    tool_call_id = "
-                    f"{msg.get('tool_call_id')}"
-                )
+                preview = content[:300]
+
+                if len(content) > 300:
+                    preview += "..."
+
+                if preview:
+                    print(
+                        "    "
+                        + preview.replace("\n", " ")
+                    )
+
+                if msg.get("tool_calls"):
+                    print(
+                        f"    tool_calls = "
+                        f"{len(msg['tool_calls'])}"
+                    )
+
+                if role == "tool":
+                    print(
+                        f"    tool_call_id = "
+                        f"{msg.get('tool_call_id')}"
+                    )
 
         # ----------------------------------------------------
         # Convert OpenAI messages -> Ollama messages
@@ -449,7 +452,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
         # }
         # ----------------------------------------------------
 
-        if isinstance(tools, list) and tools:
+        tools_enabled = True
+
+        if tool_choice == "none":
+            tools_enabled = False
+
+        if isinstance(tools, list) and tools and tools_enabled:
             ollama_body["tools"] = tools
 
         # ----------------------------------------------------
@@ -459,6 +467,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         # OpenAI tool_choice representation.
         #
         # For "auto" we simply omit it.
+        #
+        # For "none" we omit tools entirely so the model
+        # cannot call any function.
         #
         # For explicit forcing, pass it only when it is a
         # representation Ollama can accept.
@@ -499,25 +510,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 pass
 
-        print()
-        print("[Ollama Request]")
+        if DEBUG:
+            print()
+            print("[Ollama Request]")
 
-        try:
-            debug_body = json.dumps(
-                ollama_body,
-                ensure_ascii=False,
-                indent=2,
-            )
-
-            print(debug_body[:8000])
-
-            if len(debug_body) > 8000:
-                print(
-                    "[... request log truncated ...]"
+            try:
+                debug_body = json.dumps(
+                    ollama_body,
+                    ensure_ascii=False,
+                    indent=2,
                 )
 
-        except Exception:
-            print("[WARN] Could not log request")
+                print(debug_body[:8000])
+
+                if len(debug_body) > 8000:
+                    print(
+                        "[... request log truncated ...]"
+                    )
+
+            except Exception:
+                print("[WARN] Could not log request")
 
         # ----------------------------------------------------
         # Upstream request
@@ -914,6 +926,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         finish_reason = None
 
+        saw_tool_call = False
+
         print()
         print("[Stream] started")
 
@@ -1151,6 +1165,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             tool_chunk
                         )
 
+                        saw_tool_call = True
+
                         print(
                             "[Stream] tool_call: "
                             f"{name} "
@@ -1163,7 +1179,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
                 if data.get("done"):
 
-                    if tool_calls:
+                    if saw_tool_call:
                         finish_reason = (
                             "tool_calls"
                         )
