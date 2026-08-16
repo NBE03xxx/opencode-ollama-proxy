@@ -118,6 +118,39 @@ def normalize_tool_arguments(arguments):
         return "{}"
 
 
+def responses_tools_to_ollama(tools):
+    """Convert Responses API function definitions to Ollama /api/chat tools.
+
+    Responses uses {type,function name,description,parameters}; Ollama uses
+    {type,function:{name,description,parameters}}.  Chat Completions tools
+    already use the latter form and are accepted as well.
+    """
+    converted = []
+    if not isinstance(tools, list):
+        return converted
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            function = {
+                "name": tool.get("name", ""),
+                "description": tool.get("description", ""),
+                "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
+            }
+        if not function.get("name"):
+            continue
+        converted.append({
+            "type": "function",
+            "function": {
+                "name": function["name"],
+                "description": function.get("description", ""),
+                "parameters": function.get("parameters", {"type": "object", "properties": {}}),
+            },
+        })
+    return converted
+
+
 # ============================================================
 # OpenAI -> Ollama message conversion
 # ============================================================
@@ -169,6 +202,12 @@ def convert_message_to_ollama(msg):
                     "arguments": arguments,
                 }
             }
+
+            # Preserve a Responses call_id when replaying a tool-call history.
+            # Ollama ignores it when unnecessary, but models that correlate a
+            # following tool message can use it.
+            if tc.get("id"):
+                ollama_tool_call["id"] = tc["id"]
 
             # Preserve index when available.
             if "index" in tc:
@@ -1385,10 +1424,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             tools_enabled = False
 
         if isinstance(tools, list) and tools and tools_enabled:
-            ollama_tools = []
-            for t in tools:
-                if isinstance(t, dict) and t.get("type") == "function":
-                    ollama_tools.append(t)
+            # Responses API tools are flat; Ollama requires the definition
+            # under a "function" key.  The helper also keeps already-nested
+            # Chat Completions-style tools compatible.
+            ollama_tools = responses_tools_to_ollama(tools)
             if ollama_tools:
                 ollama_body["tools"] = ollama_tools
 
@@ -1400,11 +1439,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
             elif isinstance(tool_choice, str) and tool_choice != "required":
                 pass
             elif isinstance(tool_choice, dict):
-                if (
-                    tool_choice.get("type") == "function"
-                    and isinstance(tool_choice.get("function"), dict)
-                ):
-                    ollama_body["tool_choice"] = tool_choice
+                if tool_choice.get("type") == "function":
+                    # Chat Completions has function.name; Responses has name.
+                    # Normalize both to the form accepted by newer Ollama.
+                    selected = tool_choice.get("function")
+                    if not isinstance(selected, dict):
+                        selected = {"name": tool_choice.get("name", "")}
+                    if selected.get("name"):
+                        ollama_body["tool_choice"] = {
+                            "type": "function",
+                            "function": {"name": selected["name"]},
+                        }
 
         if max_output_tokens is not None:
             try:
@@ -1589,6 +1634,85 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         return str(content)
 
+    def handle_responses_non_stream(
+        self,
+        upstream,
+        model,
+        start_time,
+        request_no,
+    ):
+        """Translate a non-streaming Ollama response to a Responses object."""
+        try:
+            data = json.loads(upstream.read().decode("utf-8"))
+        except Exception as e:
+            self.send_json_headers(502)
+            self.wfile.write(json_bytes(openai_error(
+                f"Invalid Ollama JSON: {e}", "upstream_error"
+            )))
+            return
+        finally:
+            try:
+                upstream.close()
+            except Exception:
+                pass
+
+        response_id = "resp_" + uuid.uuid4().hex[:16]
+        message = data.get("message", {})
+        if not isinstance(message, dict):
+            message = {}
+        output = []
+        content = message.get("content", "")
+        if content:
+            output.append({
+                "type": "message",
+                "id": "msg_" + uuid.uuid4().hex[:16],
+                "status": "completed",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": content,
+                    "annotations": [],
+                }],
+            })
+        for index, tc in enumerate(message.get("tool_calls", []) or []):
+            if not isinstance(tc, dict):
+                continue
+            function = tc.get("function", {})
+            if not isinstance(function, dict) or not function.get("name"):
+                continue
+            output.append({
+                "type": "function_call",
+                "id": "fc_" + uuid.uuid4().hex[:16],
+                "status": "completed",
+                "call_id": tc.get("id") or "call_%d_%s" % (index, uuid.uuid4().hex[:12]),
+                "name": function["name"],
+                "arguments": normalize_tool_arguments(function.get("arguments", {})),
+            })
+        prompt_tokens = data.get("prompt_eval_count", 0)
+        output_tokens = data.get("eval_count", 0)
+        response = {
+            "id": response_id,
+            "object": "response",
+            "created_at": now_unix(),
+            "model": model,
+            "status": "completed",
+            "output": output,
+            "usage": {
+                "input_tokens": prompt_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": prompt_tokens + output_tokens,
+            },
+            "error": None,
+            "incomplete_details": None,
+        }
+        self.send_json_headers(200)
+        self.wfile.write(json_bytes(response))
+        self.wfile.flush()
+        print("[Responses Complete] Request #%s %.3fs tool_calls=%s" % (
+            request_no, time.monotonic() - start_time,
+            len([item for item in output if item["type"] == "function_call"])
+        ))
+
     def handle_responses_stream(
         self,
         upstream,
@@ -1758,6 +1882,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             },
                         )
 
+                        # The message occupies this output slot.  Function
+                        # calls that follow must not reuse its output_index.
+                        output_index += 1
+
                     message_content += content
 
                     sse_event(
@@ -1811,10 +1939,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         call_id = tc.get("id")
 
                         if not call_id:
-                            call_id = (
-                                "call_"
-                                + uuid.uuid4().hex[:16]
-                            )
+                            # Some Ollama versions omit the ID in streamed
+                            # tool chunks.  A deterministic fallback prevents
+                            # one logical call becoming many Responses items.
+                            call_id = "call_stream_%d" % index
 
                         name = function.get(
                             "name",
@@ -1854,6 +1982,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                     name,
                                 "arguments":
                                     "",
+                                "completed":
+                                    False,
                                 "output_index":
                                     output_index,
                             }
@@ -1910,7 +2040,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         # same call, do not create another item.
                         # ----------------------------------------
 
-                        if arguments:
+                        if arguments and not state["completed"]:
 
                             state["arguments"] = arguments
 
@@ -1968,6 +2098,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                         "completed"
                                     )
                                     break
+
+                            state["completed"] = True
 
                             sse_event(
                                 "response.output_item.done",
@@ -2044,6 +2176,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                     message_output_index,
                                 "item":
                                     message_item,
+                            },
+                        )
+
+                        sse_event(
+                            "response.output_text.done",
+                            {
+                                "item_id": message_item_id,
+                                "output_index": message_output_index,
+                                "content_index": 0,
+                                "text": message_content,
+                            },
+                        )
+
+                        sse_event(
+                            "response.content_part.done",
+                            {
+                                "item_id": message_item_id,
+                                "output_index": message_output_index,
+                                "content_index": 0,
+                                "part": message_item["content"][0],
                             },
                         )
 
