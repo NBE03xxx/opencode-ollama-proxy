@@ -23,34 +23,38 @@ OpenCode などの OpenAI 互換 API クライアントから Ollama を直接�
 ## Architecture
 
 ```text
-OpenCode
-   │
-   │ POST /v1/chat/completions (OpenAI-compatible)
-   ▼
+OpenCode / Codex CLI
+    │
+    │ POST /v1/chat/completions (OpenAI Chat Completions)
+    │ POST /v1/responses        (OpenAI Responses API)
+    ▼
 proxy.py
-   │
-   │ POST /api/chat (Ollama native)
-   ▼
+    │
+    │ POST /api/chat (Ollama native)
+    ▼
 Ollama
-   │
-   ▼
+    │
+    ▼
 Local LLM
 ```
 
-- クライアントは `POST /v1/chat/completions` に OpenAI 互換形式でリクエストを送信
+- クライアントは `POST /v1/chat/completions`（OpenAI Chat Completions）または `POST /v1/responses`（OpenAI Responses API）にリクエストを送信
 - プロキシが Ollama の `/api/chat` へ変換して転送
-- Ollama のレスポンスを OpenAI 互換形式へ変換してクライアントに返す
+- Ollama のレスポンスをクライアントが使用した API 形式（Chat Completions / Responses）へ変換して返す
 
 ## Features
 
 | 機能 | 説明 |
 |------|------|
-| `POST /v1/chat/completions` | OpenAI 互換の chat completions エンドポイント |
-| Streaming (SSE) | `stream: true` を指定すると Server-Sent Events でストリーミング応答 |
-| Tool calling | OpenAI 形式 ⇔ Ollama 形式の tool call 双方向変換 |
+| `POST /v1/chat/completions` | OpenAI Chat Completions 互換エンドポイント |
+| `POST /v1/responses` | OpenAI Responses API 互換エンドポイント（Codex CLI 対応）。`input` / `instructions` / フラット形式の `tools` / `function_call` / `function_call_output` を受け付け、Responses 形式のレスポンス（および SSE イベント）を返す |
+| `GET /v1/models` | Ollama の `/api/tags` からモデル一覧を OpenAI 形式で返す |
+| `GET /health` | ヘルスチェック（`{"status":"ok"}` を返す） |
+| Streaming (SSE) | `stream: true` を指定すると Server-Sent Events でストリーミング応答（Chat Completions は `chat.completion.chunk`、Responses は `response.*` イベント系列） |
+| Tool calling | OpenAI 形式 ⇔ Ollama 形式の tool call 双方向変換（Chat Completions と Responses の両形式に対応） |
 | Thinking 制御 | リクエスト時に `"think": false` を設定（Qwen thinking の無効化） |
-| `max_tokens` 変換 | `max_tokens` を Ollama の `options.num_predict` に変換 |
-| Content 正規化 | OpenAI の content parts（配列形式）を plain text に正規化 |
+| `max_tokens` / `max_output_tokens` 変換 | Chat Completions の `max_tokens`、Responses の `max_output_tokens` を Ollama の `options.num_predict` に変換 |
+| Content 正規化 | OpenAI の content parts（配列形式、`input_text` / `output_text` / `text`）を plain text に正規化 |
 | ThreadingHTTPServer | 複数リクエストの同時処理に対応 |
 | タイムアウト設定 | Ollama への接続タイムアウト（30秒）、応答受信タイムアウト（6時間）を設定可能 |
 | Nginx 対応 | `X-Accel-Buffering: no` ヘッダを送出し、リバースプロキシ環境でもストリーミングが機能するよう配慮 |
@@ -239,11 +243,14 @@ journalctl -u opencode-ollama-proxy -f
 
 ### Endpoint
 
-プロキシは以下の OpenAI 互換エンドポイントを公開します：
+プロキシは以下のエンドポイントを公開します：
 
 | Method | Path | 説明 |
 |--------|------|------|
-| `POST` | `/v1/chat/completions` | Chat completion（非ストリーム・ストリーム両対応） |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions（非ストリーム・ストリーム両対応） |
+| `POST` | `/v1/responses` | OpenAI Responses API（非ストリーム・ストリーム両対応、Codex CLI 対応） |
+| `GET` | `/v1/models` | Ollama のモデル一覧（OpenAI 形式） |
+| `GET` | `/health` ・ `/v1/health` | ヘルスチェック |
 
 その他のパスへのリクエストは `404 Not Found` で返ります。
 
@@ -382,6 +389,113 @@ curl http://localhost:8000/v1/chat/completions \
 | `"none"` | Ollama への `tools` を送信しません。モデルは関数を呼び出せなくなります |
 | `{"type": "function", "function": {"name": "..."}}` | Ollama に `tool_choice` をそのまま渡します（Ollama のバージョンにより対応状況が異なります） |
 
+### Responses API (`/v1/responses`)
+
+OpenAI の [Responses API](https://platform.openai.com/docs/api-reference/responses) 互換エンドポイントを提供します。Codex CLI がこの形式を使用するため、Codex CLI を Ollama で利用する場合はこちらのエンドポイントを指定します。
+
+#### リクエスト形式
+
+Chat Completions とは入力の形が異なります。
+
+- `instructions`：システムプロンプト相当（任意）
+- `input`：文字列、または item の配列。item は `message` / `function_call` / `function_call_output` / `reasoning` などの型を持ちます
+- `tools`：**フラット形式**（`name` / `description` / `parameters` が `function` キーの下にない形式）。プロキシが Ollama の `function` ネスト形式へ変換します
+- `max_output_tokens`：Chat Completions の `max_tokens` 相当
+
+```bash
+curl http://localhost:8000/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.6:27b-Q6",
+    "instructions": "You are a helpful assistant.",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          { "type": "input_text", "text": "東京の天気は何ですか？" }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "name": "get_weather",
+        "description": "Get the current weather for a location.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": { "type": "string", "description": "The city name" }
+          },
+          "required": ["location"]
+        }
+      }
+    ]
+  }'
+```
+
+#### 非ストリーミングレスポンス
+
+Responses 形式の `response` オブジェクトを返します。`output` 配列には `message`（テキスト）と `function_call`（ツール呼び出し）の item が入ります。
+
+```json
+{
+  "id": "resp_xxxxxxxxxxxxxxxxxx",
+  "object": "response",
+  "created_at": 1700000000,
+  "model": "qwen3.6:27b-Q6",
+  "status": "completed",
+  "output": [
+    {
+      "type": "function_call",
+      "id": "fc_xxxxxxxxxxxxxxxxxx",
+      "status": "completed",
+      "call_id": "call_0_xxxxxxxxxxxxxx",
+      "name": "get_weather",
+      "arguments": "{\"location\":\"Tokyo\"}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 5,
+    "total_tokens": 15
+  },
+  "error": null,
+  "incomplete_details": null
+}
+```
+
+#### ツール結果の再生（マルチターン）
+
+クライアント（Codex CLI など）は、モデルが返した `function_call` と実行結果 `function_call_output` を次のリクエストの `input` に含めて送り返します。プロキシはこれを Ollama の履歴（assistant の `tool_calls` と `role: tool` のメッセージ）へ変換し、モデルがツール結果を踏まえた続きを生成できるようにします。
+
+```json
+{
+  "input": [
+    { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "東京の天気は？" }] },
+    { "type": "function_call", "call_id": "call_0_abc", "name": "get_weather", "arguments": "{\"location\":\"Tokyo\"}" },
+    { "type": "function_call_output", "call_id": "call_0_abc", "output": "{\"temp\":22,\"condition\":\"sunny\"}" },
+    { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "大阪はどう？" }] }
+  ]
+}
+```
+
+#### ストリーミングレスポンス
+
+`stream: true` を指定すると、Responses API の SSE イベント系列を返します。主なイベントは以下の通りです：
+
+| イベント | 説明 |
+|----------|------|
+| `response.created` | レスポンスの開始（`status: in_progress`） |
+| `response.output_item.added` | 出力 item（message / function_call）の追加 |
+| `response.content_part.added` / `response.content_part.done` | メッセージのテキスト part の開始・終了 |
+| `response.output_text.delta` / `response.output_text.done` | テキストの逐次配信・確定 |
+| `response.function_call_arguments.delta` / `...done` | ツール引数の逐次配信・確定 |
+| `response.output_item.done` | 出力 item の確定 |
+| `response.completed` | 終了。`response.output` に全 item（message と function_call）を含む |
+
+> **重要**：Codex CLI はツール呼び出しを `response.completed` の `output` から読み取ります。そのため、ストリーミングであっても `response.completed` に `output` を含めて送信します（`output: []` にしない）。
+
 ### Model specification
 
 モデルはプロキシの設定では固定せず、API リクエストの `model` フィールドで指定します。Ollama で読み込み済みの任意のモデル名を指定できます：
@@ -405,7 +519,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 | コンポーネント | 値 |
 |---------------|-----|
-| クライアント | OpenCode |
+| クライアント | OpenCode、Codex CLI |
 | バックエンド | Ollama |
 | モデル | Qwen3.6:27B-Q6 |
 | OS | Linux |
