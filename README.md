@@ -39,26 +39,27 @@ Local LLM
 ```
 
 - クライアントは `POST /v1/chat/completions`（OpenAI Chat Completions）または `POST /v1/responses`（OpenAI Responses API）にリクエストを送信
-- プロキシが Ollama の `/api/chat` へ変換して転送
+- プロキシがリクエストを Ollama の `/api/chat` 形式へ変換して転送
 - Ollama のレスポンスをクライアントが使用した API 形式（Chat Completions / Responses）へ変換して返す
 
 ## Features
 
 | 機能 | 説明 |
 |------|------|
-| `POST /v1/chat/completions` | OpenAI Chat Completions 互換エンドポイント |
+| `POST /v1/chat/completions` | OpenAI Chat Completions 互換エンドポイント（`max_tokens` / `tool_choice` / tools に対応） |
 | `POST /v1/responses` | OpenAI Responses API 互換エンドポイント（Codex CLI 対応）。`input` / `instructions` / フラット形式の `tools` / `function_call` / `function_call_output` を受け付け、Responses 形式のレスポンス（および SSE イベント）を返す |
 | `GET /v1/models` | Ollama の `/api/tags` からモデル一覧を OpenAI 形式で返す |
-| `GET /health` | ヘルスチェック（`{"status":"ok"}` を返す） |
+| `GET /health` / `GET /v1/health` | ヘルスチェック（`{"status":"ok"}` を返す） |
 | Streaming (SSE) | `stream: true` を指定すると Server-Sent Events でストリーミング応答（Chat Completions は `chat.completion.chunk`、Responses は `response.*` イベント系列） |
 | Tool calling | OpenAI 形式 ⇔ Ollama 形式の tool call 双方向変換（Chat Completions と Responses の両形式に対応） |
-| Thinking 制御 | リクエスト時に `"think": false` を設定（Qwen thinking の無効化） |
+| Thinking 制御 | Ollama リクエストに `think` フラグを設定。環境変数 `OLLAMA_THINK` で ON/OFF を切り替え可能（デフォルトは OFF） |
 | `max_tokens` / `max_output_tokens` 変換 | Chat Completions の `max_tokens`、Responses の `max_output_tokens` を Ollama の `options.num_predict` に変換 |
-| Content 正規化 | OpenAI の content parts（配列形式、`input_text` / `output_text` / `text`）を plain text に正規化 |
+| Content 正規化 | OpenAI の content parts（配列形式の `input_text` / `output_text` / `text`）をプレーンテキストに正規化 |
 | ThreadingHTTPServer | 複数リクエストの同時処理に対応 |
-| タイムアウト設定 | Ollama への接続タイムアウト（30秒）、応答受信タイムアウト（6時間）を設定可能 |
+| タイムアウト設定 | 応答受信タイムアウト（6時間）やストリーミングアイドルタイムアウト（10分）を環境変数で設定可能 |
 | Nginx 対応 | `X-Accel-Buffering: no` ヘッダを送出し、リバースプロキシ環境でもストリーミングが機能するよう配慮 |
-| 環境変数設定 | 接続先・待ち受け先を環境変数で柔軟に設定可能 |
+| 環境変数設定 | 接続先・待ち受け先・タイムアウト・リクエストサイズ上限などを環境変数で柔軟に設定可能 |
+| リクエストサイズ制限 | リクエストボディが上限（デフォルト 64MB）を超える場合は `413 Request Entity Too Large` を返す |
 
 ### モデル指定について
 
@@ -108,13 +109,13 @@ sudo ./install.sh
 
 ### アンインストール
 
-同様に `uninstall.sh` をダウンロード・実行権限付与した上で、`sudo` で実行します：
+同様に `uninstall.sh` をダウンロードして実行権限を付与した上で、`sudo` で実行します：
 
 ```bash
 sudo ./uninstall.sh
 ```
 
-サービス停止、ファイル削除、systemd のクリーンアップが自動的に行われます。既存の `override.conf` についてはホームディレクトリへのバックアップを取得するかどうか確認されます。
+サービス停止、ファイル削除、systemd のクリーンアップが自動的に行われます。既存の `override.conf` については、ホームディレクトリにバックアップを作成するかどうか確認されます。
 
 > **注意**: スクリプトは root 権限が必要であり、`sudo` で実行してください。Ollama そのものはアンインストール対象外です。
 
@@ -127,7 +128,13 @@ sudo ./uninstall.sh
 | `OLLAMA_HOST` | Ollama サーバーの接続先（末尾に `/api/chat` が自動付加） | `http://127.0.0.1:11434` |
 | `LISTEN_HOST` | プロキシの待ち受けアドレス | `0.0.0.0` |
 | `LISTEN_PORT` | プロキシの待ち受けポート | `8000` |
-| `DEBUG` | `1` / `true` / `yes` を設定すると、リクエストメッセージのプレビューと Ollama 送信ボディの詳細ログを出力します。デフォルトでは出力されません | 無効 |
+| `CONNECT_TIMEOUT` | Ollama への接続確立タイムアウト（秒） | `30` |
+| `READ_TIMEOUT` | Ollama からの応答受信タイムアウト（秒） | `21600`（6時間） |
+| `STREAM_IDLE_TIMEOUT` | Responses API ストリーミング時のアイドルタイムアウト（秒）。この間応答が止まると、ストリームをタイムアウトとして終了します | `600`（10分） |
+| `MAX_REQUEST_BYTES` | 許容するリクエストボディの最大サイズ（バイト）。超過すると `413` を返します | `67108864`（64MB） |
+| `OLLAMA_KEEP_ALIVE` | Ollama へのリクエストに付与する `keep_alive` 値。モデルのメモリ保持期間を制御します | `30m` |
+| `OLLAMA_THINK` | `1` / `true` / `yes` を設定すると Ollama に `think: true` を送信し、思考モードを有効にします。それ以外は `think: false` | 無効（`think: false`） |
+| `DEBUG` | `1` / `true` / `yes` を設定すると、リクエストメッセージのプレビューと Ollama 送信ボディの詳細ログを出力します。デフォルトでは無効です | 無効 |
 
 ### 内部接続動作
 
@@ -135,14 +142,11 @@ sudo ./uninstall.sh
 
 ### タイムアウト設定
 
-Ollama への接続時に使用するタイムアウト値は以下の通りです。これらの値は現状環境変数で上書きできません。
+タイムアウトは環境変数で上書きできます（上の表を参照）。
 
-| 定数名 | 説明 | デフォルト値 |
-|--------|------|-------------|
-| `CONNECT_TIMEOUT` | Ollama への接続確立タイムアウト（現在未使用） | 30秒 |
-| `READ_TIMEOUT` | Ollama からの応答受信タイムアウト | 6時間（21600秒） |
-
-長文生成や大規模な tool calling 処理に対応するため、応答受信のタイムアウト値は比較的大きな値に設定されています。
+- `CONNECT_TIMEOUT`：Ollama への接続確立タイムアウト
+- `READ_TIMEOUT`：Ollama からの応答受信タイムアウト。長文生成や大規模な tool calling 処理に対応するため、デフォルトは比較的大きな値です
+- `STREAM_IDLE_TIMEOUT`：Responses API のストリーミング応答中に、Ollama からこの時間何も受信できなかった場合にストリームをタイムアウトとして終了させます
 
 ## Running
 
@@ -164,7 +168,7 @@ OLLAMA_HOST=http://localhost:11434 LISTEN_PORT=8000 python3 proxy.py
 ======================================================================
 OpenCode / Ollama proxy
 ======================================================================
-Server : OpenCode/Ollama native tool-calling proxy
+Server : OpenCode + Codex / Ollama compatibility proxy v2
 Listen : http://0.0.0.0:8000
 Ollama : http://127.0.0.1:11434/api/chat
 ======================================================================
@@ -319,14 +323,14 @@ curl http://localhost:8000/v1/chat/completions \
 
 #### ストリーミング時のヘッダ仕様
 
-プロキシはストリーミング応答において以下の HTTP ヘッダを設定します：
+プロキシはストリーミング応答の HTTP ヘッダに以下の値を設定します：
 
 - `Content-Type: text/event-stream; charset=utf-8` — SSE 形式のコンテンツタイプを示す
 - `Cache-Control: no-cache` — クライアント側のキャッシュを無効化する
 - `Connection: close` — 応答完了後に接続を閉じる
 - `X-Accel-Buffering: no` — Nginx などのリバースプロキシがレスポンスをバッファリングしないよう指示する
 
-特に `X-Accel-Buffering: no` は、プロキシの手前に Nginx を配置している場合に、ストリーミング応答がリアルタイムでクライアントに配信されるようにするために必要です。このヘッダがないと Nginx がレスポンスをバッファリングし、ストリーミングの効果が失われる可能性があります。
+特に `X-Accel-Buffering: no` は、プロキシの手前に Nginx を配置している場合に、ストリーミング応答がリアルタイムでクライアントに配信されるようにするために重要です。このヘッダがないと Nginx がレスポンスをバッファリングし、ストリーミングの効果が失われる可能性があります。
 
 また、Ollama へのアップストリームリクエストでは、ストリーミング時の `Accept` ヘッダを `application/x-ndjson` に設定しています。これにより Ollama から行区切りの JSON（NDJSON）形式でストリーミングデータを受信します。非ストリーミング時は `application/json` が使用されます。
 
@@ -344,7 +348,7 @@ data: [DONE]
 
 ### Tool calling
 
-OpenAI 互換の tool calling を使用できます。プロキシが OpenAI 形式と Ollama 形式の間で変換を行います：
+OpenAI 互換の tool calling を使用できます。プロキシが OpenAI 形式と Ollama 形式の間で変換を行います。
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -387,7 +391,8 @@ curl http://localhost:8000/v1/chat/completions \
 |----|------|
 | `"auto"` | Ollama に `tools` をそのまま渡し、モデルが判断します |
 | `"none"` | Ollama への `tools` を送信しません。モデルは関数を呼び出せなくなります |
-| `{"type": "function", "function": {"name": "..."}}` | Ollama に `tool_choice` をそのまま渡します（Ollama のバージョンにより対応状況が異なります） |
+| `"required"` | ツール呼び出しを強制する指定は Ollama に渡されません。ツールは送信されますが、呼び出しはモデルの判断に委ねられます |
+| `{"type": "function", "function": {"name": "..."}}` | 関数指定の強制として Ollama に渡します（Ollama のバージョンにより対応状況が異なります） |
 
 ### Responses API (`/v1/responses`)
 
@@ -395,11 +400,11 @@ OpenAI の [Responses API](https://platform.openai.com/docs/api-reference/respon
 
 #### リクエスト形式
 
-Chat Completions とは入力の形が異なります。
+Chat Completions とは入力の形式が異なります。
 
 - `instructions`：システムプロンプト相当（任意）
-- `input`：文字列、または item の配列。item は `message` / `function_call` / `function_call_output` / `reasoning` などの型を持ちます
-- `tools`：**フラット形式**（`name` / `description` / `parameters` が `function` キーの下にない形式）。プロキシが Ollama の `function` ネスト形式へ変換します
+- `input`：文字列、または item の配列。item は `message` / `function_call` / `function_call_output` / `reasoning` などの型を持ちます。`reasoning` 型の item は無視されます
+- `tools`：**フラット形式**（`name` / `description` / `parameters` が `function` キーの下にない形式）。プロキシが Ollama の `function` ネスト形式へ変換します（Chat Completions 形式のネスト済み tools もそのまま受け付けます）
 - `max_output_tokens`：Chat Completions の `max_tokens` 相当
 
 ```bash
@@ -482,17 +487,23 @@ Responses 形式の `response` オブジェクトを返します。`output` 配�
 
 #### ストリーミングレスポンス
 
-`stream: true` を指定すると、Responses API の SSE イベント系列を返します。主なイベントは以下の通りです：
+`stream: true` を指定すると、Responses API の SSE イベント系列を返します。各イベントには `sequence_number` が付与されます。主なイベントは以下の通りです：
 
 | イベント | 説明 |
 |----------|------|
 | `response.created` | レスポンスの開始（`status: in_progress`） |
+| `response.in_progress` | 処理中の状態通知 |
 | `response.output_item.added` | 出力 item（message / function_call）の追加 |
 | `response.content_part.added` / `response.content_part.done` | メッセージのテキスト part の開始・終了 |
 | `response.output_text.delta` / `response.output_text.done` | テキストの逐次配信・確定 |
 | `response.function_call_arguments.delta` / `...done` | ツール引数の逐次配信・確定 |
 | `response.output_item.done` | 出力 item の確定 |
-| `response.completed` | 終了。`response.output` に全 item（message と function_call）を含む |
+| `response.completed` | 正常終了。`response.output` に全 item（message と function_call）を含む |
+| `response.failed` | エラー発生時の終了（タイムアウト、Ollama のエラー、ストリーム途中での異常終了など）。`response.error` にエラー情報を含む |
+
+- ツール呼び出しは Ollama の `id`（無い場合はストリーム上の安定した位置）で識別し、同一の呼び出しに対して複数の item が作成されないよう管理します。引数イベントは Ollama の `done` マーカーを受信した後にまとめて送信されます
+- ストリーミング中に応答が `STREAM_IDLE_TIMEOUT` 以上止まると、`response.failed`（`code: stream_timeout`）で終了します
+- Ollama のストリームに `error` フィールドや不正な JSON が含まれる場合も、`response.failed` で終了します
 
 > **重要**：Codex CLI はツール呼び出しを `response.completed` の `output` から読み取ります。そのため、ストリーミングであっても `response.completed` に `output` を含めて送信します（`output: []` にしない）。
 
@@ -508,10 +519,12 @@ Responses 形式の `response` オブジェクトを返します。`output` 配�
 
 ## Limitations
 
-- **特定 API 挙動への依存**：Ollama `/api/chat` の特定のレスポンス形式を前提としています
+- **特定 API 挙動への依存**：Ollama の `/api/chat` の特定のレスポンス形式を前提としています
 - **クライアント互換性**：すべての OpenAI 互換 API クライアントで完全な動作を保証するものではありません
 - **認証機能なし**：認証、アクセス制御、TLS 終端は提供しません。プロキシは内部ネットワークでの利用を想定しています
-- **推論環境への依存**：推論性能や GPU 利用状況は Ollama、モデル、GPU、ドライバ環境に依存します
+- **リクエストサイズ制限**：リクエストボディはデフォルトで 64MB（`MAX_REQUEST_BYTES` で変更可能）までです。これを超えるリクエストは `413` で拒否されます
+- **`tool_choice` の制約**：`required` によるツール呼び出し強制は Ollama 側に渡されません（モデルの判断に委ねられます）
+- **推論環境への依存**：推論性能や GPU 利用状況は Ollama、モデル、GPU、ドライバの環境に依存します
 
 ## Tested Environment
 
@@ -529,7 +542,7 @@ Responses 形式の `response` オブジェクトを返します。`output` 配�
 
 ## Background
 
-このプロキシは、ローカル AI コーディングエージェント環境の検証プロジェクトから生まれました。OpenCode から Ollama を直接利用する構成で API 実装差異に起因する問題が発生したため、中間層として API 変換プロキシを開発しました。その後、独立したコンポーネントとして分離・公開しています。
+このプロキシは、ローカル AI コーディングエージェント環境の検証プロジェクトから生まれました。OpenCode から Ollama を直接利用する構成で API 実装差異に起因する問題が発生したため、中間層として API 変換プロキシを開発しました。その後、独立したコンポーネントとして分離し、公開しています。
 
 ## License
 
