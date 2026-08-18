@@ -5,6 +5,7 @@ import os
 import time
 import uuid
 import traceback
+import socket
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -25,10 +26,14 @@ OLLAMA_URL = OLLAMA_HOST.rstrip("/") + "/api/chat"
 HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
 PORT = int(os.environ.get("LISTEN_PORT", "8000"))
 
-CONNECT_TIMEOUT = 30
-READ_TIMEOUT = 60 * 60 * 6  # 6 hours
+CONNECT_TIMEOUT = float(os.environ.get("CONNECT_TIMEOUT", "30"))
+READ_TIMEOUT = float(os.environ.get("READ_TIMEOUT", str(60 * 60 * 6)))
+STREAM_IDLE_TIMEOUT = float(os.environ.get("STREAM_IDLE_TIMEOUT", "600"))
+MAX_REQUEST_BYTES = int(os.environ.get("MAX_REQUEST_BYTES", str(64 * 1024 * 1024)))
+OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
+OLLAMA_THINK = os.environ.get("OLLAMA_THINK", "0").lower() in ("1", "true", "yes")
 
-SERVER_NAME = "OpenCode/Ollama native tool-calling proxy"
+SERVER_NAME = "OpenCode + Codex / Ollama compatibility proxy v2"
 
 DEBUG = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
 
@@ -233,6 +238,8 @@ def convert_message_to_ollama(msg):
     # --------------------------------------------------------
 
     if role == "tool":
+        if msg.get("tool_call_id"):
+            result["tool_call_id"] = msg["tool_call_id"]
         if msg.get("name"):
             result["name"] = msg["name"]
 
@@ -313,9 +320,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
 
-        if self.path == "/v1/chat/completions":
+        path = urlparse(self.path).path
+        if path == "/v1/chat/completions":
             self._dispatch("/v1/chat/completions", self.handle_chat_completion)
-        elif self.path == "/v1/responses":
+        elif path == "/v1/responses":
             self._dispatch("/v1/responses", self.handle_responses)
         else:
             self.send_json_headers(404)
@@ -528,11 +536,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "model": model,
             "messages": ollama_messages,
 
-            # Current environment intentionally disables
-            # Qwen thinking.
-            "think": False,
+            # Default remains off for compatibility; configurable for models
+            # whose reasoning mode is useful and supported by Ollama.
+            "think": OLLAMA_THINK,
 
             "stream": stream,
+            "keep_alive": OLLAMA_KEEP_ALIVE,
         }
 
         # ----------------------------------------------------
@@ -1366,7 +1375,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def handle_responses(self, request_no):
 
-        content_length = int(self.headers.get("Content-Length", "0"))
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = -1
+        if content_length < 0 or content_length > MAX_REQUEST_BYTES:
+            self.send_json_headers(413)
+            self.wfile.write(json_bytes(openai_error(
+                "Request body is too large", "invalid_request_error"
+            )))
+            return
         raw_body = self.rfile.read(content_length)
 
         try:
@@ -1383,6 +1401,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
         input_data = body.get("input", [])
         tools = body.get("tools")
         tool_choice = body.get("tool_choice")
+
+        if not isinstance(model, str) or not model:
+            self.send_json_headers(400)
+            self.wfile.write(json_bytes(openai_error(
+                "model must be a non-empty string", "invalid_request_error"
+            )))
+            return
 
         print()
         print("[Responses Request Parameters]")
@@ -1415,8 +1440,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         ollama_body = {
             "model": model,
             "messages": ollama_messages,
-            "think": False,
+            "think": OLLAMA_THINK,
             "stream": stream,
+            "keep_alive": OLLAMA_KEEP_ALIVE,
         }
 
         tools_enabled = True
@@ -1526,7 +1552,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
 
         if stream:
-            self.handle_responses_stream(upstream, model, start_time, request_no)
+            self.handle_responses_stream_v2(upstream, model, start_time, request_no)
         else:
             self.handle_responses_non_stream(upstream, model, start_time, request_no)
 
@@ -2290,6 +2316,250 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 f"Request #{request_no} "
                 f"{elapsed:.3f}s"
             )
+
+
+    def handle_responses_stream_v2(self, upstream, model, start_time, request_no):
+        """Emit a coherent Responses SSE stream from Ollama NDJSON.
+
+        All intermediate events and the final response are produced from one
+        retained state.  Tool calls are keyed by Ollama id when available and
+        by their stable stream slot otherwise.  They are only finalized after
+        Ollama's done marker, so repeated/full argument chunks cannot create
+        duplicate or prematurely completed calls.
+        """
+        self.send_sse_headers()
+        response_id = "resp_" + uuid.uuid4().hex[:16]
+        created_at = now_unix()
+        output = []
+        message_state = None
+        calls_by_key = {}
+        calls_in_order = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        sequence_number = 0
+        saw_done = False
+        terminal_sent = False
+
+        def event(event_type, **fields):
+            nonlocal sequence_number
+            payload = {"type": event_type, "sequence_number": sequence_number}
+            sequence_number += 1
+            payload.update(fields)
+            if DEBUG:
+                print("[Responses SSE]", event_type, fields.get("output_index", ""))
+            self.send_sse(payload)
+
+        def response_object(status, error=None, incomplete_details=None):
+            usage = None
+            if status in ("completed", "incomplete", "failed"):
+                usage = {
+                    "input_tokens": prompt_tokens,
+                    "output_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                }
+            return {
+                "id": response_id,
+                "object": "response",
+                "created_at": created_at,
+                "model": model,
+                "status": status,
+                "output": output,
+                "usage": usage,
+                "error": error,
+                "incomplete_details": incomplete_details,
+            }
+
+        def ensure_message():
+            nonlocal message_state
+            if message_state is not None:
+                return message_state
+            index = len(output)
+            item = {
+                "type": "message",
+                "id": "msg_" + uuid.uuid4().hex[:16],
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            }
+            message_state = {"index": index, "item": item, "text": ""}
+            output.append(item)
+            event("response.output_item.added", output_index=index, item=dict(item))
+            event(
+                "response.content_part.added",
+                item_id=item["id"], output_index=index, content_index=0,
+                part={"type": "output_text", "text": "", "annotations": []},
+            )
+            return message_state
+
+        def ensure_call(tc, stream_index):
+            function = tc.get("function")
+            if not isinstance(function, dict):
+                function = {}
+            upstream_id = tc.get("id")
+            upstream_index = tc.get("index", stream_index)
+            key = ("id", str(upstream_id)) if upstream_id else ("index", upstream_index)
+            state = calls_by_key.get(key)
+            if state is None:
+                index = len(output)
+                call_id = str(upstream_id) if upstream_id else "call_" + uuid.uuid4().hex[:24]
+                item = {
+                    "type": "function_call",
+                    "id": "fc_" + uuid.uuid4().hex[:16],
+                    "status": "in_progress",
+                    "call_id": call_id,
+                    "name": str(function.get("name") or ""),
+                    "arguments": "",
+                }
+                state = {"key": key, "index": index, "item": item, "arguments": ""}
+                calls_by_key[key] = state
+                calls_in_order.append(state)
+                output.append(item)
+                event("response.output_item.added", output_index=index, item=dict(item))
+                print("[Responses] tool call started name=%s call_id=%s" % (
+                    item["name"], call_id
+                ))
+            if function.get("name"):
+                state["item"]["name"] = str(function["name"])
+            if "arguments" in function:
+                state["arguments"] = normalize_tool_arguments(function.get("arguments"))
+            return state
+
+        def finalize_message():
+            if message_state is None or message_state["item"]["status"] == "completed":
+                return
+            item = message_state["item"]
+            index = message_state["index"]
+            text = message_state["text"]
+            part = {"type": "output_text", "text": text, "annotations": []}
+            item["content"] = [part]
+            event(
+                "response.output_text.done", item_id=item["id"],
+                output_index=index, content_index=0, text=text,
+            )
+            event(
+                "response.content_part.done", item_id=item["id"],
+                output_index=index, content_index=0, part=part,
+            )
+            item["status"] = "completed"
+            event("response.output_item.done", output_index=index, item=dict(item))
+
+        def finalize_calls():
+            for state in calls_in_order:
+                item = state["item"]
+                if item["status"] == "completed":
+                    continue
+                arguments = state["arguments"] or "{}"
+                item["arguments"] = arguments
+                event(
+                    "response.function_call_arguments.delta",
+                    item_id=item["id"], output_index=state["index"], delta=arguments,
+                )
+                event(
+                    "response.function_call_arguments.done",
+                    item_id=item["id"], output_index=state["index"], arguments=arguments,
+                )
+                item["status"] = "completed"
+                event("response.output_item.done", output_index=state["index"], item=dict(item))
+                print("[Responses] tool call completed name=%s call_id=%s" % (
+                    item["name"], item["call_id"]
+                ))
+
+        try:
+            # urllib does not expose a public read-timeout setter.  Walk the
+            # known response wrappers and set the underlying socket when it is
+            # available; otherwise READ_TIMEOUT remains the safe fallback.
+            sock = getattr(getattr(getattr(upstream, "fp", None), "raw", None), "_sock", None)
+            if sock is not None and STREAM_IDLE_TIMEOUT > 0:
+                sock.settimeout(STREAM_IDLE_TIMEOUT)
+
+            event("response.created", response=response_object("in_progress"))
+            event("response.in_progress", response=response_object("in_progress"))
+
+            while True:
+                line = upstream.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise RuntimeError("Invalid Ollama stream JSON: %s" % exc) from exc
+                if not isinstance(data, dict):
+                    raise RuntimeError("Invalid Ollama stream item")
+                if data.get("error"):
+                    raise RuntimeError(str(data["error"]))
+
+                if data.get("prompt_eval_count") is not None:
+                    prompt_tokens = int(data.get("prompt_eval_count") or 0)
+                if data.get("eval_count") is not None:
+                    completion_tokens = int(data.get("eval_count") or 0)
+
+                message = data.get("message")
+                if not isinstance(message, dict):
+                    message = {}
+                content = message.get("content")
+                if content:
+                    state = ensure_message()
+                    delta = str(content)
+                    state["text"] += delta
+                    event(
+                        "response.output_text.delta", item_id=state["item"]["id"],
+                        output_index=state["index"], content_index=0, delta=delta,
+                    )
+
+                tool_calls = message.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    for stream_index, tc in enumerate(tool_calls):
+                        if isinstance(tc, dict):
+                            ensure_call(tc, stream_index)
+
+                if data.get("done"):
+                    saw_done = True
+                    break
+
+            if not saw_done:
+                raise RuntimeError("Ollama stream ended before its done marker")
+
+            finalize_message()
+            finalize_calls()
+            event("response.completed", response=response_object("completed"))
+            terminal_sent = True
+
+        except (socket.timeout, TimeoutError) as exc:
+            error = {"code": "stream_timeout", "message": str(exc) or "Ollama stream timed out"}
+            try:
+                event("response.failed", response=response_object("failed", error=error))
+                terminal_sent = True
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            print("[ERROR] Responses stream idle timeout:", exc)
+        except (BrokenPipeError, ConnectionResetError):
+            print("[WARN] Responses streaming client disconnected")
+        except Exception as exc:
+            print("[ERROR] Responses streaming exception:", exc)
+            if DEBUG:
+                traceback.print_exc()
+            error = {"code": "upstream_error", "message": str(exc)}
+            try:
+                event("response.failed", response=response_object("failed", error=error))
+                terminal_sent = True
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        finally:
+            try:
+                upstream.close()
+            except Exception:
+                pass
+            if terminal_sent:
+                try:
+                    self.send_done()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            print("[Responses Stream] finished Request #%s %.3fs" % (
+                request_no, time.monotonic() - start_time
+            ))
 
 
 # ============================================================
