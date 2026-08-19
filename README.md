@@ -168,7 +168,7 @@ OLLAMA_HOST=http://localhost:11434 LISTEN_PORT=8000 python3 proxy.py
 ======================================================================
 Ollama Agent Proxy
 ======================================================================
-Server : Ollama Agent Proxy (OpenAI-compatible) v2
+Server : Ollama Agent Proxy (OpenAI-compatible) v1.0
 Listen : http://0.0.0.0:8000
 Ollama : http://127.0.0.1:11434/api/chat
 ======================================================================

@@ -33,7 +33,7 @@ MAX_REQUEST_BYTES = int(os.environ.get("MAX_REQUEST_BYTES", str(64 * 1024 * 1024
 OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
 OLLAMA_THINK = os.environ.get("OLLAMA_THINK", "0").lower() in ("1", "true", "yes")
 
-SERVER_NAME = "Ollama Agent Proxy (OpenAI-compatible) v2"
+SERVER_NAME = "Ollama Agent Proxy (OpenAI-compatible) v1.0"
 
 DEBUG = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
 
