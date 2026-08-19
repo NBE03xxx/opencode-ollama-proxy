@@ -19,11 +19,11 @@
 
 ## 2. proxy.py の保存先
 
-**インストール先ディレクトリ**: `/opt/opencode-ollama-proxy`
+**インストール先ディレクトリ**: `/opt/ollama-agent-proxy`
 
 ### ディレクトリ処理ロジック
 
-1. `/opt/opencode-ollama-proxy` が存在しない場合
+1. `/opt/ollama-agent-proxy` が存在しない場合
    - `mkdir -p` で作成
    - 適切な権限を付与（owner: root, mode: 0755）
 
@@ -34,7 +34,7 @@
     - 「y」の場合は上書きを行う
 
 3. GitHub から `proxy.py` を取得
-    - 取得先: `https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/proxy.py`
+    - 取得先: `https://raw.githubusercontent.com/NBE03xxx/ollama-agent-proxy/main/proxy.py`
     - `curl -fsSL` でダウンロード
     - ダウンロード失敗時はインストールを中止（ロールバック）
     - 実行権限（0755）を付与
@@ -43,7 +43,7 @@
 
 ## 2-1. proxy.py の取得先
 
-**GitHub Raw URL**: `https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/proxy.py`
+**GitHub Raw URL**: `https://raw.githubusercontent.com/NBE03xxx/ollama-agent-proxy/main/proxy.py`
 
 インストールスクリプトは、上記の raw コンテントURL から `curl -fsSL` を用いて `proxy.py` をダウンロードします。
 
@@ -101,11 +101,11 @@
 
 ### サービスファイル
 
-**パス**: `/etc/systemd/system/opencode-ollama-proxy.service`
+**パス**: `/etc/systemd/system/ollama-agent-proxy.service`
 
 ```ini
 [Unit]
-Description=OpenCode Ollama Proxy
+Description=Ollama Agent Proxy
 After=network-online.target ollama.service
 Wants=network-online.target
 
@@ -113,8 +113,8 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/opt/opencode-ollama-proxy
-ExecStart=/usr/bin/python3 /opt/opencode-ollama-proxy/proxy.py
+WorkingDirectory=/opt/ollama-agent-proxy
+ExecStart=/usr/bin/python3 /opt/ollama-agent-proxy/proxy.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
@@ -136,7 +136,7 @@ WantedBy=multi-user.target
 
 ## 5. 環境変数（drop-in）
 
-**パス**: `/etc/systemd/system/opencode-ollama-proxy.service.d/override.conf`
+**パス**: `/etc/systemd/system/ollama-agent-proxy.service.d/override.conf`
 
 README.md に記載されている推奨設定に従い、drop-in ファイルで環境変数を設定します。
 
@@ -185,7 +185,7 @@ Environment="LISTEN_PORT=8000"
     ┗ ディレクトリ既存 → proxy.pyの上書き確認（y/n）
         → 「n」の場合: キャンセル処理へ（9以降をスキップ、10へ）
 
-9. GitHub から proxy.py をダウンロードし、/opt/opencode-ollama-proxy/ に配置・権限付与
+9. GitHub から proxy.py をダウンロードし、/opt/ollama-agent-proxy/ に配置・権限付与
 10. systemd サービスファイルの生成
 11. drop-in 環境変数設定の生成
 
@@ -211,10 +211,10 @@ Environment="LISTEN_PORT=8000"
 
 | 変更内容 | ロールバック方法 |
 |----------|-----------------|
-| `/opt/opencode-ollama-proxy/` の新規作成 | ディレクトリが空の場合のみ `rmdir` で削除 |
+| `/opt/ollama-agent-proxy/` の新規作成 | ディレクトリが空の場合のみ `rmdir` で削除 |
 | `proxy.py` のダウンロード・上書き | 上書きの場合はバックアップから復元。新規ダウンロードの場合はファイル削除 |
-| サービスファイルの生成 | `/etc/systemd/system/opencode-ollama-proxy.service` を削除 |
-| drop-in ファイルの生成 | `/etc/systemd/system/opencode-ollama-proxy.service.d/` ディレクトリを削除 |
+| サービスファイルの生成 | `/etc/systemd/system/ollama-agent-proxy.service` を削除 |
+| drop-in ファイルの生成 | `/etc/systemd/system/ollama-agent-proxy.service.d/` ディレクトリを削除 |
 | daemon-reload の実行 | ロールバック後に再度 `systemctl daemon-reload` を実行 |
 
 ### バックアップ方針
@@ -231,7 +231,7 @@ Environment="LISTEN_PORT=8000"
 | Python3 未インストール | メッセージ出力後、即座に終了（exit 1） |
 | systemd 不可用 | メッセージ出力後、即座に終了（exit 1） |
 | ディスク書き込み失敗 | エラーメッセージ出力後、ロールバック処理を実行し終了（exit 1） |
-| サービス起動失敗 | エラーメッセージ出力し、`journalctl -u opencode-ollama-proxy -f` の実行を提示（exit 1） |
+| サービス起動失敗 | エラーメッセージ出力し、`journalctl -u ollama-agent-proxy -f` の実行を提示（exit 1） |
 
 ---
 
@@ -248,5 +248,5 @@ Environment="LISTEN_PORT=8000"
 - **Ollama モデル**: `qwen3.6` の有無は注意喚起のみで、強制インストールは行いません。ユーザーの判断に委ねます
 - **ポート競合チェック方法**: 優先して `ss -tlnp` を使用し、利用できない場合は `/proc/net/tcp` の直接パース（16進数変換 + STATE=0A マッチ）でフォールバックします
 - **ollama コマンドのフォールバック**: `command -v ollama` で存在確認後、`ollama list` が失敗する場合は `curl http://127.0.0.1:11434/api/tags` で Ollama API に直接アクセスします
-- **proxy.py の取得方法**: ローカルコピーではなく、GitHub の raw コンテントURL から `curl -fsSL` でダウンロードします。取得先は `https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/proxy.py` です
+- **proxy.py の取得方法**: ローカルコピーではなく、GitHub の raw コンテントURL から `curl -fsSL` でダウンロードします。取得先は `https://raw.githubusercontent.com/NBE03xxx/ollama-agent-proxy/main/proxy.py` です
 - **モデル名検出方法**: `grep -i 'qwen3\.6'` で部分一致。タグ（`:latest`, `:27b-Q6` など）を含めてマッチさせるため、厳密なバージョン指定は行いません

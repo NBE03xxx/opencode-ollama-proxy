@@ -1,11 +1,11 @@
-# OpenCode Ollama Proxy
+# Ollama Agent Proxy
 
 OpenAI互換APIクライアント（OpenCode など）から Ollama を利用するための軽量なHTTPプロキシです。
 
 ```text
 OpenCode（OpenAI互換APIクライアント）
    ↓
-OpenCode Ollama Proxy
+Ollama Agent Proxy
    ↓
 Ollama
    ↓
@@ -89,8 +89,8 @@ Local LLM
 1. リポジトリからスクリプトをダウンロードします：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/install.sh -o install.sh
-curl -fsSL https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/uninstall.sh -o uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/NBE03xxx/ollama-agent-proxy/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/NBE03xxx/ollama-agent-proxy/main/uninstall.sh -o uninstall.sh
 ```
 
 2. 実行権限を付与します：
@@ -166,9 +166,9 @@ OLLAMA_HOST=http://localhost:11434 LISTEN_PORT=8000 python3 proxy.py
 
 ```
 ======================================================================
-OpenCode / Ollama proxy
+Ollama Agent Proxy
 ======================================================================
-Server : OpenCode + Codex / Ollama compatibility proxy v2
+Server : Ollama Agent Proxy (OpenAI-compatible) v2
 Listen : http://0.0.0.0:8000
 Ollama : http://127.0.0.1:11434/api/chat
 ======================================================================
@@ -186,11 +186,11 @@ Ollama : http://127.0.0.1:11434/api/chat
 
 #### Main service file
 
-`/etc/systemd/system/opencode-ollama-proxy.service`：
+`/etc/systemd/system/ollama-agent-proxy.service`：
 
 ```ini
 [Unit]
-Description=OpenCode Ollama Proxy
+Description=Ollama Agent Proxy
 After=network-online.target ollama.service
 Wants=network-online.target
 
@@ -198,8 +198,8 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/opt/opencode-ollama-proxy
-ExecStart=/usr/bin/python3 /opt/opencode-ollama-proxy/proxy.py
+WorkingDirectory=/opt/ollama-agent-proxy
+ExecStart=/usr/bin/python3 /opt/ollama-agent-proxy/proxy.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
@@ -210,7 +210,7 @@ WantedBy=multi-user.target
 
 #### Environment override (drop-in)
 
-環境変数は drop-in で設定するのが推奨です。`/etc/systemd/system/opencode-ollama-proxy.service.d/override.conf`：
+環境変数は drop-in で設定するのが推奨です。`/etc/systemd/system/ollama-agent-proxy.service.d/override.conf`：
 
 ```ini
 [Service]
@@ -223,24 +223,24 @@ Environment="LISTEN_PORT=8000"
 
 #### Service management
 
-以下の例ではサービス名を `opencode-ollama-proxy` としています。実環境のサービス名に合わせて読み替えてください。
+以下の例ではサービス名を `ollama-agent-proxy` としています。実環境のサービス名に合わせて読み替えてください。
 
 ```bash
 # 有効化（自動起動）
-sudo systemctl enable opencode-ollama-proxy
+sudo systemctl enable ollama-agent-proxy
 
 # 開始
-sudo systemctl start opencode-ollama-proxy
+sudo systemctl start ollama-agent-proxy
 
 # 設定変更後の再起動
 sudo systemctl daemon-reload
-sudo systemctl restart opencode-ollama-proxy
+sudo systemctl restart ollama-agent-proxy
 
 # 状態確認
-systemctl status opencode-ollama-proxy
+systemctl status ollama-agent-proxy
 
 # ログ確認
-journalctl -u opencode-ollama-proxy -f
+journalctl -u ollama-agent-proxy -f
 ```
 
 ## API Usage

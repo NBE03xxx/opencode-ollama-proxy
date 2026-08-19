@@ -23,9 +23,9 @@
 
 | 対象 | パス |
 |------|------|
-| systemd サービスファイル | `/etc/systemd/system/opencode-ollama-proxy.service` |
-| drop-in ディレクトリ（環境変数） | `/etc/systemd/system/opencode-ollama-proxy.service.d/` |
-| インストールディレクトリ | `/opt/opencode-ollama-proxy/` |
+| systemd サービスファイル | `/etc/systemd/system/ollama-agent-proxy.service` |
+| drop-in ディレクトリ（環境変数） | `/etc/systemd/system/ollama-agent-proxy.service.d/` |
+| インストールディレクトリ | `/opt/ollama-agent-proxy/` |
 
 ---
 
@@ -45,9 +45,9 @@
 アンインストール対象となる各リソースが存在するか確認します。
 
 **チェック項目**:
-1. `/etc/systemd/system/opencode-ollama-proxy.service` の存在確認
-2. `/etc/systemd/system/opencode-ollama-proxy.service.d/` ディレクトリの存在確認
-3. `/opt/opencode-ollama-proxy/proxy.py` の存在確認
+1. `/etc/systemd/system/ollama-agent-proxy.service` の存在確認
+2. `/etc/systemd/system/ollama-agent-proxy.service.d/` ディレクトリの存在確認
+3. `/opt/ollama-agent-proxy/proxy.py` の存在確認
 
 **判定ロジック**:
 
@@ -58,7 +58,7 @@
 | 存在 | 存在 | 存在 | 完全インストール → 処理続行 |
 
 - **完全に不存在の場合**
-  - 「OpenCode Ollama Proxy はインストールされていないようです」とメッセージ出力後、終了（exit 0）
+  - 「Ollama Agent Proxy はインストールされていないようです」とメッセージ出力後、終了（exit 0）
 
 - **不完全な状態が検出された場合 (1つ〜2つのリソースのみが存在)**
   - 「不完全な状態が検出されました。以下のリソースを削除してもよろしいですか？」と警告
@@ -68,16 +68,16 @@
 
 ### 3-3. サービス稼働中の確認
 
-`systemctl is-active opencode-ollama-proxy` でサービスの稼働状態を確認します。
+`systemctl is-active ollama-agent-proxy` でサービスの稼働状態を確認します。
 
 - **サービスが active の場合**
-  - 「OpenCode Ollama Proxy は現在稼働中です。アンインストールするとサービスが停止します」と警告
+  - 「Ollama Agent Proxy は現在稼働中です。アンインストールするとサービスが停止します」と警告
   - ユーザーに確認（y/n）
   - 「n」の場合は終了（exit 0）
 
 ### 3-4. drop-in ファイルのバックアップ確認
 
-`/etc/systemd/system/opencode-ollama-proxy.service.d/override.conf` が存在する場合、ユーザーが手動で書き換えや追加設定を行っている可能性があるため、削除前にホームディレクトリへバックアップを取得するかどうかを確認します。
+`/etc/systemd/system/ollama-agent-proxy.service.d/override.conf` が存在する場合、ユーザーが手動で書き換えや追加設定を行っている可能性があるため、削除前にホームディレクトリへバックアップを取得するかどうかを確認します。
 
 **判定ロジック**:
 
@@ -87,14 +87,14 @@
 3. **存在する場合**
     - ファイルの内容を表示（または行数・最終更新日などの情報を出力）
     - 実行元ユーザーのホームディレクトリにバックアップを取得するか確認（y/n）：
-      - バックアップ先: `<実行元ユーザーのホーム>/opencode-ollama-proxy-backup/override.conf`
-      - `sudo` で実行した場合は `$SUDO_USER` のホームが使用される（例: `/home/yoshimi/opencode-ollama-proxy-backup/override.conf`）
-      - 「y」の場合: `<実行元ユーザーのホーム>/opencode-ollama-proxy-backup/` を作成してコピー
+      - バックアップ先: `<実行元ユーザーのホーム>/ollama-agent-proxy-backup/override.conf`
+      - `sudo` で実行した場合は `$SUDO_USER` のホームが使用される（例: `/home/<ユーザー名>/ollama-agent-proxy-backup/override.conf`）
+      - 「y」の場合: `<実行元ユーザーのホーム>/ollama-agent-proxy-backup/` を作成してコピー
       - 「n」の場合: バックアップなしで処理続行
 
 ### 3-5. インストールディレクトリの中身確認
 
-`/opt/opencode-ollama-proxy/` が存在する場合、中身のファイルを確認します。
+`/opt/ollama-agent-proxy/` が存在する場合、中身のファイルを確認します。
 
 - **予期しないファイルが存在する場合**
   - 「インストールディレクトリに予期しないファイルが含まれています」と警告
@@ -109,9 +109,9 @@
 ```
 以下のリソースが削除されます:
 
-  [ ] /etc/systemd/system/opencode-ollama-proxy.service
-  [ ] /etc/systemd/system/opencode-ollama-proxy.service.d/
-  [ ] /opt/opencode-ollama-proxy/proxy.py
+  [ ] /etc/systemd/system/ollama-agent-proxy.service
+  [ ] /etc/systemd/system/ollama-agent-proxy.service.d/
+  [ ] /opt/ollama-agent-proxy/proxy.py
     ※ ディレクトリには予期しないファイルが含まれているため、ディレクトリ自体は残します
 
 本当にアンインストールしますか？ (y/n)
@@ -143,7 +143,7 @@
     → 存在: ホームディレクトリへのバックアップを促す（y/n）
 
 【フェーズ4: ディレクトリ内容確認】
-6. /opt/opencode-ollama-proxy/ の中身を確認
+6. /opt/ollama-agent-proxy/ の中身を確認
     → 予期しないファイルがある場合: 警告、削除範囲の調整
 
 【フェーズ5: ユーザー最終承認】
@@ -152,15 +152,15 @@
     → 「n」の場合: 終了（exit 0）
 
 【フェーズ6: サービス停止】
-9. systemctl stop opencode-ollama-proxy
+9. systemctl stop ollama-agent-proxy
     → サービスが存在しない・既に停止している場合はスキップ
-10. systemctl disable opencode-ollama-proxy
+10. systemctl disable ollama-agent-proxy
     → 無効化されていない場合はスキップ
 
 【フェーズ7: ファイル削除】
-11. /etc/systemd/system/opencode-ollama-proxy.service を削除
-12. /etc/systemd/system/opencode-ollama-proxy.service.d/ ディレクトリを削除
-13. /opt/opencode-ollama-proxy/proxy.py を削除
+11. /etc/systemd/system/ollama-agent-proxy.service を削除
+12. /etc/systemd/system/ollama-agent-proxy.service.d/ ディレクトリを削除
+13. /opt/ollama-agent-proxy/proxy.py を削除
     ※ 予期しないファイルがない場合はディレクトリ全体を削除
 
 【フェーズ8: クリーンアップ】
@@ -174,7 +174,7 @@
 
 ### 5-1. stop 処理
 
-`systemctl stop opencode-ollama-proxy` を実行してサービスを停止します。
+`systemctl stop ollama-agent-proxy` を実行してサービスを停止します。
 
 - **サービスが存在しない場合**
   - エラーを抑制し、スキップメッセージを出力
@@ -183,7 +183,7 @@
 
 ### 5-2. disable 処理
 
-`systemctl disable opencode-ollama-proxy` を実行して自動起動を無効化します。
+`systemctl disable ollama-agent-proxy` を実行して自動起動を無効化します。
 
 - **既に無効化されている場合**
   - エラーを抑制し、スキップメッセージを出力
@@ -194,14 +194,14 @@
 
 ### 6-1. サービスファイルの削除
 
-`/etc/systemd/system/opencode-ollama-proxy.service` を `rm -f` で削除します。
+`/etc/systemd/system/ollama-agent-proxy.service` を `rm -f` で削除します。
 
 - **既に存在しない場合**
   - スキップメッセージを出力
 
 ### 6-2. drop-in ディレクトリの削除
 
-`/etc/systemd/system/opencode-ollama-proxy.service.d/` ディレクトリ全体を `rm -rf` で削除します。
+`/etc/systemd/system/ollama-agent-proxy.service.d/` ディレクトリ全体を `rm -rf` で削除します。
 
 - **既に存在しない場合**
   - スキップメッセージを出力
@@ -212,11 +212,11 @@
 
 #### 予期しないファイルがない場合
 
-`/opt/opencode-ollama-proxy/` ディレクトリ全体を `rm -rf` で削除します。
+`/opt/ollama-agent-proxy/` ディレクトリ全体を `rm -rf` で削除します。
 
 #### 予期しないファイルがある場合
 
-`proxy.py` のみを `rm` で削除し、ディレクトリ自体は残します。ユーザーに「ディレクトリ /opt/opencode-ollama-proxy/ は予期しないファイルが含まれているためそのまま残しました」とメッセージを出力します。
+`proxy.py` のみを `rm` で削除し、ディレクトリ自体は残します。ユーザーに「ディレクトリ /opt/ollama-agent-proxy/ は予期しないファイルが含まれているためそのまま残しました」とメッセージを出力します。
 
 - **ディレクトリが既に存在しない場合**
   - スキップメッセージを出力
@@ -241,9 +241,9 @@
 アンインストールが完了しました。
 
 削除されたリソース:
-  ✓ /etc/systemd/system/opencode-ollama-proxy.service
-  ✓ /etc/systemd/system/opencode-ollama-proxy.service.d/
-  ✓ /opt/opencode-ollama-proxy/
+  ✓ /etc/systemd/system/ollama-agent-proxy.service
+  ✓ /etc/systemd/system/ollama-agent-proxy.service.d/
+  ✓ /opt/ollama-agent-proxy/
 ```
 
 **一部のリソースが残っている場合**:
@@ -251,18 +251,18 @@
 アンインストールが完了しました（一部リソースが残っています）。
 
 削除されたリソース:
-  ✓ /etc/systemd/system/opencode-ollama-proxy.service
-  ✓ /etc/systemd/system/opencode-ollama-proxy.service.d/
-  ✓ /opt/opencode-ollama-proxy/proxy.py
+  ✓ /etc/systemd/system/ollama-agent-proxy.service
+  ✓ /etc/systemd/system/ollama-agent-proxy.service.d/
+  ✓ /opt/ollama-agent-proxy/proxy.py
 
 残っているリソース:
-  ! /opt/opencode-ollama-proxy/ （予期しないファイルが含まれているため）
+  ! /opt/ollama-agent-proxy/ （予期しないファイルが含まれているため）
 ```
 
 **バックアップを取得した場合**:
 ```
 設定ファイルをバックアップしました:
-  ~ ~/opencode-ollama-proxy-backup/override.conf
+  ~ ~/ollama-agent-proxy-backup/override.conf
 （※ sudo で実行した場合は実行元ユーザーのホームディレクトリ配下）
 ```
 
@@ -300,6 +300,6 @@
 ## 9. 既知の制約・考慮事項
 
 - **ログの保持**: アンインストール時に journalctl のログ履歴は自動削除しません。ユーザーに対して手動で削除するコマンドを提示します
-- **drop-in ファイルのバックアップ**: `override.conf` が存在する場合、実行元ユーザーのホームディレクトリ（`<SUDO_USER のホーム>/opencode-ollama-proxy-backup/override.conf`）へのバックアップを取得するかどうかをユーザーに確認します。sudo で実行した場合は `$HOME`(`/root`) ではなく実行元の一般ユーザーのホームが使用されます。再インストール時にはこのバックアップから復元可能です
+- **drop-in ファイルのバックアップ**: `override.conf` が存在する場合、実行元ユーザーのホームディレクトリ（`<SUDO_USER のホーム>/ollama-agent-proxy-backup/override.conf`）へのバックアップを取得するかどうかをユーザーに確認します。sudo で実行した場合は `$HOME`(`/root`) ではなく実行元の一般ユーザーのホームが使用されます。再インストール時にはこのバックアップから復元可能です
 - **Ollama そのもの**: Ollama サービスやモデルはアンインストール対象外です。影響しないことを明記します
 - **再インストール**: アンインストール後に再度 `install.sh` を実行すれば、新しくインストール可能です

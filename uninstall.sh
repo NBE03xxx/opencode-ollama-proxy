@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # ============================================================
-# OpenCode Ollama Proxy - Uninstallation Script
+# Ollama Agent Proxy - Uninstallation Script
 # ============================================================
 
-SERVICE_NAME="opencode-ollama-proxy"
+SERVICE_NAME="ollama-agent-proxy"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DROPIN_DIR="/etc/systemd/system/${SERVICE_NAME}.service.d"
 DROPIN_FILE="${DROPIN_DIR}/override.conf"
-INSTALL_DIR="/opt/opencode-ollama-proxy"
+INSTALL_DIR="/opt/ollama-agent-proxy"
 _ORIGINAL_USER="${SUDO_USER:-}"
 if [[ -z "$_ORIGINAL_USER" ]]; then
     _ORIGINAL_USER=""
@@ -17,12 +17,12 @@ fi
 if [[ -n "$_ORIGINAL_USER" ]]; then
     _ORIGINAL_HOME="$(getent passwd "$_ORIGINAL_USER" 2>/dev/null | cut -d: -f6)" || true
     if [[ -n "$_ORIGINAL_HOME" ]]; then
-        BACKUP_DIR="${_ORIGINAL_HOME}/opencode-ollama-proxy-backup"
+        BACKUP_DIR="${_ORIGINAL_HOME}/ollama-agent-proxy-backup"
     else
-        BACKUP_DIR="${HOME}/opencode-ollama-proxy-backup"
+        BACKUP_DIR="${HOME}/ollama-agent-proxy-backup"
     fi
 else
-    BACKUP_DIR="${HOME}/opencode-ollama-proxy-backup"
+    BACKUP_DIR="${HOME}/ollama-agent-proxy-backup"
 fi
 
 # Track deletion results
@@ -97,7 +97,7 @@ fi
 # All not present -> nothing to uninstall
 if [[ "$HAS_SERVICE" == false && "$HAS_DROPIN" == false && "$HAS_PROXY" == false ]]; then
     echo ""
-    warn "OpenCode Ollama Proxy does not appear to be installed."
+    warn "Ollama Agent Proxy does not appear to be installed."
     exit 0
 fi
 

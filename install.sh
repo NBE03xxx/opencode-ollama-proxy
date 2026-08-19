@@ -2,15 +2,15 @@
 set -euo pipefail
 
 # ============================================================
-# OpenCode Ollama Proxy - Installation Script
+# Ollama Agent Proxy - Installation Script
 # ============================================================
 
-INSTALL_DIR="/opt/opencode-ollama-proxy"
-SERVICE_NAME="opencode-ollama-proxy"
+INSTALL_DIR="/opt/ollama-agent-proxy"
+SERVICE_NAME="ollama-agent-proxy"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DROPIN_DIR="/etc/systemd/system/${SERVICE_NAME}.service.d"
 DROPIN_FILE="${DROPIN_DIR}/override.conf"
-PROXY_URL="https://raw.githubusercontent.com/NBE03xxx/opencode-ollama-proxy/main/proxy.py"
+PROXY_URL="https://raw.githubusercontent.com/NBE03xxx/ollama-agent-proxy/main/proxy.py"
 
 # Track what we've created for rollback
 CREATED_DIR=false
@@ -270,7 +270,7 @@ info "Installed proxy.py -> ${INSTALL_DIR}/proxy.py"
 # --- systemd service file ---
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=OpenCode Ollama Proxy
+Description=Ollama Agent Proxy
 After=network-online.target ollama.service
 Wants=network-online.target
 
