@@ -404,6 +404,7 @@ Chat Completions とは入力の形式が異なります。
 
 - `instructions`：システムプロンプト相当（任意）
 - `input`：文字列、または item の配列。item は `message` / `function_call` / `function_call_output` / `reasoning` などの型を持ちます。`reasoning` 型の item は無視されます
+- `input` 内の `system` / `developer` ロールの `message`：`instructions` とともに出現順で連結され、Ollama へ渡す履歴の先頭に単一の `system` メッセージとして配置されます
 - `tools`：**フラット形式**（`name` / `description` / `parameters` が `function` キーの下にない形式）。プロキシが Ollama の `function` ネスト形式へ変換します（Chat Completions 形式のネスト済み tools もそのまま受け付けます）
 - `max_output_tokens`：Chat Completions の `max_tokens` 相当
 
@@ -504,6 +505,7 @@ Responses 形式の `response` オブジェクトを返します。`output` 配�
 - ツール呼び出しは Ollama の `id`（無い場合はストリーム上の安定した位置）で識別し、同一の呼び出しに対して複数の item が作成されないよう管理します。引数イベントは Ollama の `done` マーカーを受信した後にまとめて送信されます
 - ストリーミング中に応答が `STREAM_IDLE_TIMEOUT` 以上止まると、`response.failed`（`code: stream_timeout`）で終了します
 - Ollama のストリームに `error` フィールドや不正な JSON が含まれる場合も、`response.failed` で終了します
+- Ollama が HTTP エラーを返した場合や接続できない場合も、通常の OpenAI エラーオブジェクトを単独で送るのではなく、`response.created` に続いて `response.failed` を送信します。`response.failed.response.error` の `code` は `upstream_error` または `connection_error` となり、最後に `data: [DONE]` を送信します
 
 > **重要**：Codex CLI はツール呼び出しを `response.completed` の `output` から読み取ります。そのため、ストリーミングであっても `response.completed` に `output` を含めて送信します（`output: []` にしない）。
 
