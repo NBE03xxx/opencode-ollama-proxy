@@ -1512,6 +1512,39 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         start_time = time.monotonic()
 
+        def send_responses_failure(error_code, error_message):
+            self.send_sse_headers()
+            response_id = "resp_" + uuid.uuid4().hex[:16]
+            created_at = now_unix()
+
+            def response_object(status, error=None):
+                return {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_at,
+                    "model": model,
+                    "status": status,
+                    "output": [],
+                    "usage": None,
+                    "error": error,
+                    "incomplete_details": None,
+                }
+
+            self.send_sse({
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": response_object("in_progress"),
+            })
+            self.send_sse({
+                "type": "response.failed",
+                "sequence_number": 1,
+                "response": response_object("failed", {
+                    "code": error_code,
+                    "message": error_message,
+                }),
+            })
+            self.send_done()
+
         try:
             upstream = urlopen(upstream_request, timeout=READ_TIMEOUT)
         except HTTPError as e:
@@ -1523,9 +1556,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             error_text = error_body.decode("utf-8", errors="replace")
             print(f"[ERROR] Ollama HTTP {e.code}: {error_text}")
             if stream:
-                self.send_sse_headers()
-                self.send_sse(openai_error(error_text, "upstream_error"))
-                self.send_done()
+                send_responses_failure("upstream_error", error_text)
             else:
                 self.send_json_headers(502)
                 self.wfile.write(json_bytes(openai_error(error_text, "upstream_error")))
@@ -1533,9 +1564,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except URLError as e:
             print(f"[ERROR] Cannot connect to Ollama: {e}")
             if stream:
-                self.send_sse_headers()
-                self.send_sse(openai_error(f"Cannot connect to Ollama: {e}", "connection_error"))
-                self.send_done()
+                send_responses_failure(
+                    "connection_error", f"Cannot connect to Ollama: {e}"
+                )
             else:
                 self.send_json_headers(502)
                 self.wfile.write(json_bytes(openai_error(f"Cannot connect to Ollama: {e}", "connection_error")))
@@ -1543,9 +1574,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"[ERROR] Upstream connection error: {e}")
             if stream:
-                self.send_sse_headers()
-                self.send_sse(openai_error(str(e), "connection_error"))
-                self.send_done()
+                send_responses_failure("connection_error", str(e))
             else:
                 self.send_json_headers(502)
                 self.wfile.write(json_bytes(openai_error(str(e), "connection_error")))
@@ -1559,16 +1588,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _responses_input_to_messages(self, instructions, input_data):
 
         messages = []
+        system_parts = []
 
         if instructions:
-            messages.append({"role": "system", "content": instructions})
+            system_parts.append(self._responses_content_to_text(instructions))
 
         if isinstance(input_data, str):
             messages.append({"role": "user", "content": input_data})
+            if system_parts:
+                messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
             return messages
 
         if not isinstance(input_data, list):
             messages.append({"role": "user", "content": str(input_data)})
+            if system_parts:
+                messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
             return messages
 
         for item in input_data:
@@ -1584,8 +1618,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if item_type == "message":
                 role = item.get("role", "user")
                 content = self._responses_content_to_text(item.get("content"))
-                if role == "developer":
-                    role = "system"
+                if role in ("system", "developer"):
+                    system_parts.append(content)
+                    continue
                 messages.append({"role": role, "content": content})
 
             elif item_type == "function_call":
@@ -1633,6 +1668,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 content = item.get("content", "")
                 if isinstance(content, str) and content:
                     messages.append({"role": "user", "content": content})
+
+        if system_parts:
+            messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
 
         return messages
 
