@@ -1,0 +1,9 @@
+# Runtime files managed by install.sh and uninstall.sh.
+proxy.py
+common.py
+ollama.py
+agents/__init__.py
+agents/opencode.py
+agents/codex.py
+agents/claudecode.py
+LICENSE

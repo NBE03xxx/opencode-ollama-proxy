@@ -29,10 +29,13 @@ OpenCode / Codex CLI
     │ POST /v1/responses        (OpenAI Responses API)
     ▼
 proxy.py
-    │
-    │ POST /api/chat (Ollama native)
-    ▼
-Ollama
+    ├── agents/       OpenCode / Codex 形式変換
+    ├── ollama.py     Ollama HTTP 通信
+    └── common.py     副作用のない共通処理
+          │
+          │ POST /api/chat (Ollama native)
+          ▼
+        Ollama
     │
     ▼
 Local LLM
@@ -77,14 +80,14 @@ Local LLM
 ## Requirements
 
 - Linux（systemd 搭載）
-- Python 3
+- Python 3.10 以上
 - curl
 - Ollama（起動済み）
 - OpenCode など OpenAI 互換 API クライアント
 
 ## Quick Start (Using Scripts)
 
-`install.sh` / `uninstall.sh` を利用すると、GitHub からファイルをダウンロードして systemd サービスとして自動的にインストール・アンインストールできます。
+`install.sh` / `uninstall.sh` を利用すると、GitHub の単一アーカイブからランタイム一式をダウンロードし、systemd サービスとしてインストール・アンインストールできます。`proxy.py`、`common.py`、`ollama.py`、`agents/` は必ず同じバージョンから配置されます。
 
 1. リポジトリからスクリプトをダウンロードします：
 
@@ -105,6 +108,16 @@ chmod +x install.sh uninstall.sh
 sudo ./install.sh
 ```
 
+特定タグまたはコミットとリリースの SHA-256 を指定する場合：
+
+```bash
+sudo OLLAMA_AGENT_PROXY_VERSION=v1.0.0 \
+  OLLAMA_AGENT_PROXY_SHA256=<archive-sha256> \
+  ./install.sh
+```
+
+`main` の開発用インストールで `OLLAMA_AGENT_PROXY_SHA256` を省略すると、警告後にハッシュ検証なしで続行します。タグまたはコミットを指定する場合、SHA-256 は必須です。
+
 インストール時に、接続先・待ち受けポートなどの設定をインタラクティブに入力できます（Enter でデフォルト値を採用）。Ollama の動作確認、モデルの確認、ポート競合チェックが自動的に行われます。
 
 ### アンインストール
@@ -116,6 +129,7 @@ sudo ./uninstall.sh
 ```
 
 サービス停止、ファイル削除、systemd のクリーンアップが自動的に行われます。既存の `override.conf` については、ホームディレクトリにバックアップを作成するかどうか確認されます。
+ランタイムは `install-manifest.txt` に記載されたファイルだけが削除され、管理外ファイルは保持されます。
 
 > **注意**: スクリプトは root 権限が必要であり、`sudo` で実行してください。Ollama そのものはアンインストール対象外です。
 

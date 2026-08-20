@@ -1,0 +1,4 @@
+{"message":{"content":"A"}}
+{"message":{"content":"B"}}
+{"message":{"tool_calls":[{"id":"call_1","function":{"name":"f","arguments":{"x":1}}}]}}
+{"message":{},"done":true,"prompt_eval_count":4,"eval_count":2}

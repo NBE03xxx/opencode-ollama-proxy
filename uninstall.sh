@@ -10,6 +10,7 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DROPIN_DIR="/etc/systemd/system/${SERVICE_NAME}.service.d"
 DROPIN_FILE="${DROPIN_DIR}/override.conf"
 INSTALL_DIR="/opt/ollama-agent-proxy"
+MANIFEST_FILE="${INSTALL_DIR}/install-manifest.txt"
 _ORIGINAL_USER="${SUDO_USER:-}"
 if [[ -z "$_ORIGINAL_USER" ]]; then
     _ORIGINAL_USER=""
@@ -89,9 +90,9 @@ if [[ -d "$DROPIN_DIR" ]]; then
     info "Found: ${DROPIN_DIR}/"
 fi
 
-if [[ -f "${INSTALL_DIR}/proxy.py" ]]; then
+if [[ -f "${INSTALL_DIR}/proxy.py" || -f "$MANIFEST_FILE" ]]; then
     HAS_PROXY=true
-    info "Found: ${INSTALL_DIR}/proxy.py"
+    info "Found runtime installation: ${INSTALL_DIR}"
 fi
 
 # All not present -> nothing to uninstall
@@ -121,7 +122,7 @@ if [[ "$PARTIAL_STATE" == true ]]; then
         warn "  - ${DROPIN_DIR}/"
     fi
     if [[ "$HAS_PROXY" == true ]]; then
-        warn "  - ${INSTALL_DIR}/proxy.py"
+        warn "  - ${INSTALL_DIR} runtime files"
     fi
     echo ""
     if ! confirm "Continue with removal?"; then
@@ -173,15 +174,25 @@ info "===== Phase 4: Checking install directory ====="
 
 REMOVE_DIR_FULLY=true
 
+is_managed_path() {
+    local relative_path="$1"
+    [[ "$relative_path" == "install-manifest.txt" ]] && return 0
+    if [[ -f "$MANIFEST_FILE" ]]; then
+        grep -Fqx -- "$relative_path" "$MANIFEST_FILE"
+    else
+        [[ "$relative_path" == "proxy.py" || "$relative_path" == "proxy.py.bak" ]]
+    fi
+}
+
 if [[ -d "$INSTALL_DIR" ]]; then
-    # List all files in the directory (excluding . and ..)
+    # Compare every file recursively with the managed-file manifest.
     EXTRA_FILES=()
     while IFS= read -r -d '' file; do
-        _BASENAME="$(basename -- "$file" 2>/dev/null)" || continue
-        if [[ "$_BASENAME" != "proxy.py" && "$_BASENAME" != "proxy.py.bak" ]]; then
-            EXTRA_FILES+=("$_BASENAME")
+        RELATIVE_PATH="${file#${INSTALL_DIR}/}"
+        if ! is_managed_path "$RELATIVE_PATH"; then
+            EXTRA_FILES+=("$RELATIVE_PATH")
         fi
-    done < <(find "$INSTALL_DIR" -maxdepth 1 -mindepth 1 -print0)
+    done < <(find "$INSTALL_DIR" -type f -print0)
 
     if [[ ${#EXTRA_FILES[@]} -gt 0 ]]; then
         warn "Unexpected files found in ${INSTALL_DIR}:"
@@ -190,11 +201,7 @@ if [[ -d "$INSTALL_DIR" ]]; then
         done
         echo ""
         REMOVE_DIR_FULLY=false
-        if confirm "Remove the entire directory including these files?"; then
-            REMOVE_DIR_FULLY=true
-        else
-            info "Will remove only proxy.py and keep the directory."
-        fi
+        info "Only files listed in install-manifest.txt will be removed."
     fi
 else
     info "${INSTALL_DIR} does not exist. Skipping content check."
@@ -220,7 +227,7 @@ if [[ "$HAS_PROXY" == true ]]; then
     if [[ "$REMOVE_DIR_FULLY" == true ]]; then
         echo "  [ ] ${INSTALL_DIR}/"
     else
-        echo "  [ ] ${INSTALL_DIR}/proxy.py"
+        echo "  [ ] managed runtime files in ${INSTALL_DIR}/"
         echo "      (directory will be kept due to unexpected files)"
     fi
 fi
@@ -291,31 +298,39 @@ else
     info "${DROPIN_DIR}/ not found. Skipping."
 fi
 
-# --- Install directory / proxy.py ---
+# --- Managed runtime files ---
 if [[ -d "$INSTALL_DIR" ]]; then
-    if [[ "$REMOVE_DIR_FULLY" == true ]]; then
-        if rm -rf "$INSTALL_DIR"; then
-            DELETED_PROXY=true
-            info "Removed ${INSTALL_DIR}/"
-        else
-            error "Failed to remove ${INSTALL_DIR}/"
-            HAS_DELETE_FAILURE=true
-        fi
-    else
-        # Remove only proxy.py (and .bak if present)
-        if [[ -f "${INSTALL_DIR}/proxy.py" ]]; then
-            if rm -f "${INSTALL_DIR}/proxy.py"; then
-                DELETED_PROXY=true
-                info "Removed ${INSTALL_DIR}/proxy.py"
-            else
-                error "Failed to remove ${INSTALL_DIR}/proxy.py"
-                HAS_DELETE_FAILURE=true
+    RUNTIME_DELETE_FAILED=false
+    if [[ -f "$MANIFEST_FILE" ]]; then
+        while IFS= read -r MANAGED_PATH || [[ -n "$MANAGED_PATH" ]]; do
+            [[ -z "$MANAGED_PATH" || "$MANAGED_PATH" == \#* ]] && continue
+            if [[ "$MANAGED_PATH" == /* || "$MANAGED_PATH" == *".."* ]]; then
+                warn "Skipping unsafe manifest path: ${MANAGED_PATH}"
+                RUNTIME_DELETE_FAILED=true
+                continue
             fi
-        else
-            info "${INSTALL_DIR}/proxy.py not found. Skipping."
-        fi
+            if [[ -f "${INSTALL_DIR}/${MANAGED_PATH}" ]]; then
+                rm -f -- "${INSTALL_DIR}/${MANAGED_PATH}" || RUNTIME_DELETE_FAILED=true
+            fi
+        done < "$MANIFEST_FILE"
+        rm -f -- "$MANIFEST_FILE" || RUNTIME_DELETE_FAILED=true
+    else
+        # Legacy single-file installation.
+        rm -f -- "${INSTALL_DIR}/proxy.py" || RUNTIME_DELETE_FAILED=true
         rm -f "${INSTALL_DIR}/proxy.py.bak" 2>/dev/null || true
+    fi
+
+    find "$INSTALL_DIR" -depth -type d -empty -delete 2>/dev/null || true
+    if [[ "$RUNTIME_DELETE_FAILED" == false ]]; then
+        DELETED_PROXY=true
+        info "Removed managed runtime files from ${INSTALL_DIR}/"
+    else
+        error "Failed to remove one or more managed runtime files."
+        HAS_DELETE_FAILURE=true
+    fi
+    if [[ -d "$INSTALL_DIR" ]]; then
         SKIPPED_INSTALL_DIR=true
+        info "Kept ${INSTALL_DIR}/ because unmanaged files remain."
     fi
 else
     info "${INSTALL_DIR} not found. Skipping."
@@ -375,13 +390,13 @@ fi
 if [[ "$HAS_PROXY" == true ]]; then
     if [[ "$DELETED_PROXY" == true ]]; then
         if [[ "$SKIPPED_INSTALL_DIR" == true ]]; then
-            echo -e "  ${GREEN}✓${NC} ${INSTALL_DIR}/proxy.py"
+            echo -e "  ${GREEN}✓${NC} managed runtime files"
             echo -e "  ${YELLOW}!${NC} ${INSTALL_DIR}/ (kept - unexpected files present)"
         else
             echo -e "  ${GREEN}✓${NC} ${INSTALL_DIR}/"
         fi
     else
-        echo -e "  ${RED}✗${NC} ${INSTALL_DIR}/proxy.py (failed)"
+        echo -e "  ${RED}✗${NC} managed runtime files (failed)"
     fi
 fi
 

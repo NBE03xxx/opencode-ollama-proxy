@@ -10,15 +10,22 @@ SERVICE_NAME="ollama-agent-proxy"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DROPIN_DIR="/etc/systemd/system/${SERVICE_NAME}.service.d"
 DROPIN_FILE="${DROPIN_DIR}/override.conf"
-PROXY_URL="https://raw.githubusercontent.com/NBE03xxx/ollama-agent-proxy/main/proxy.py"
+REPOSITORY="NBE03xxx/ollama-agent-proxy"
+INSTALL_REF="${OLLAMA_AGENT_PROXY_VERSION:-main}"
+ARCHIVE_URL="https://github.com/${REPOSITORY}/archive/${INSTALL_REF}.tar.gz"
+EXPECTED_SHA256="${OLLAMA_AGENT_PROXY_SHA256:-}"
 
 # Track what we've created for rollback
-CREATED_DIR=false
-BACKUP_FILE=""
-PROXY_COPIED=false
+STAGE_ROOT=""
+BACKUP_DIR=""
+FILES_INSTALLED=false
 SERVICE_CREATED=false
 DROPIN_CREATED=false
 SERVICE_ENABLED=false
+SERVICE_WAS_ACTIVE=false
+SERVICE_WAS_ENABLED=false
+SERVICE_BACKUP=""
+DROPIN_BACKUP=""
 
 # Colors
 RED='\033[0;31m'
@@ -38,35 +45,46 @@ rollback() {
     echo ""
     warn "Rolling back changes..."
 
-    if [[ "$SERVICE_ENABLED" == true ]]; then
+    if [[ "$SERVICE_ENABLED" == true && "$SERVICE_WAS_ENABLED" == false ]]; then
         systemctl disable "$SERVICE_NAME" 2>/dev/null && info "Disabled service" || true
     fi
 
     if [[ "$SERVICE_CREATED" == true ]]; then
-        rm -f "$SERVICE_FILE" && info "Removed service file" || true
-    fi
-
-    if [[ "$DROPIN_CREATED" == true ]]; then
-        rm -rf "$DROPIN_DIR" && info "Removed drop-in directory" || true
-    fi
-
-    if [[ "$PROXY_COPIED" == true ]]; then
-        if [[ -n "$BACKUP_FILE" && -f "$BACKUP_FILE" ]]; then
-            mv -- "$BACKUP_FILE" "${INSTALL_DIR}/proxy.py" && info "Restored proxy.py from backup" || true
+        if [[ -n "$SERVICE_BACKUP" && -f "$SERVICE_BACKUP" ]]; then
+            cp -f -- "$SERVICE_BACKUP" "$SERVICE_FILE" && info "Restored service file" || true
         else
-            rm -f "${INSTALL_DIR}/proxy.py" && info "Removed copied proxy.py" || true
+            rm -f "$SERVICE_FILE" && info "Removed service file" || true
         fi
     fi
 
-    if [[ -n "$BACKUP_FILE" && -f "$BACKUP_FILE" ]]; then
-        rm -f "$BACKUP_FILE" || true
+    if [[ "$DROPIN_CREATED" == true ]]; then
+        rm -rf -- "$DROPIN_DIR" || true
+        if [[ -n "$DROPIN_BACKUP" && -d "$DROPIN_BACKUP" ]]; then
+            cp -a -- "$DROPIN_BACKUP" "$DROPIN_DIR" && info "Restored drop-in directory" || true
+        else
+            info "Removed drop-in directory"
+        fi
     fi
 
-    if [[ "$CREATED_DIR" == true && -d "$INSTALL_DIR" ]]; then
-        rmdir "$INSTALL_DIR" 2>/dev/null && info "Removed install directory" || true
+    if [[ "$FILES_INSTALLED" == true && -d "$INSTALL_DIR" ]]; then
+        rm -rf -- "$INSTALL_DIR" || true
+    fi
+
+    if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
+        mv -- "$BACKUP_DIR" "$INSTALL_DIR" && info "Restored previous installation" || true
+    fi
+
+    if [[ -n "$STAGE_ROOT" && -d "$STAGE_ROOT" ]]; then
+        rm -rf -- "$STAGE_ROOT" || true
     fi
 
     systemctl daemon-reload 2>/dev/null && info "Reloaded systemd daemon" || true
+    if [[ "$SERVICE_WAS_ENABLED" == true ]]; then
+        systemctl enable "$SERVICE_NAME" 2>/dev/null || true
+    fi
+    if [[ "$SERVICE_WAS_ACTIVE" == true ]]; then
+        systemctl start "$SERVICE_NAME" 2>/dev/null && info "Restarted previous service" || true
+    fi
 
     error "Installation cancelled. All changes have been rolled back."
 }
@@ -104,6 +122,21 @@ info "Python3: $(python3 --version)"
 
 if ! command -v curl &>/dev/null; then
     error "curl is not installed."
+    exit 1
+fi
+
+if ! command -v tar &>/dev/null; then
+    error "tar is not installed."
+    exit 1
+fi
+
+if [[ -n "$EXPECTED_SHA256" ]] && ! command -v sha256sum &>/dev/null; then
+    error "sha256sum is required when OLLAMA_AGENT_PROXY_SHA256 is set."
+    exit 1
+fi
+
+if [[ "$INSTALL_REF" != "main" && -z "$EXPECTED_SHA256" ]]; then
+    error "OLLAMA_AGENT_PROXY_SHA256 is required for a tagged or commit-pinned install."
     exit 1
 fi
 
@@ -233,41 +266,106 @@ if [[ -f "$SERVICE_FILE" ]]; then
     fi
 
     # Stop existing service before overwriting
+    if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+        SERVICE_WAS_ENABLED=true
+    fi
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        SERVICE_WAS_ACTIVE=true
         warn "Stopping existing ${SERVICE_NAME}..."
         systemctl stop "$SERVICE_NAME" 2>/dev/null || true
     fi
 fi
 
-# --- Install directory ---
-if [[ ! -d "$INSTALL_DIR" ]]; then
-    mkdir -p "$INSTALL_DIR"
-    chmod 0755 "$INSTALL_DIR"
-    CREATED_DIR=true
-    info "Created ${INSTALL_DIR}"
-else
-    # Check for existing proxy.py
-    if [[ -f "${INSTALL_DIR}/proxy.py" ]]; then
-        BACKUP_FILE="${INSTALL_DIR}/proxy.py.bak"
-        cp -f "${INSTALL_DIR}/proxy.py" "$BACKUP_FILE"
-        info "Backed up existing file to ${BACKUP_FILE}"
-    else
-        rm -f "${INSTALL_DIR}/proxy.py.bak"
-    fi
-fi
+# --- Download and verify one versioned archive ---
+STAGE_ROOT=$(mktemp -d "/opt/.ollama-agent-proxy.XXXXXX")
+SOURCE_DIR="${STAGE_ROOT}/source"
+STAGED_INSTALL="${STAGE_ROOT}/install"
+ARCHIVE_FILE="${STAGE_ROOT}/source.tar.gz"
+mkdir -p "$SOURCE_DIR" "$STAGED_INSTALL"
 
-# --- Download proxy.py from GitHub ---
-info "Downloading proxy.py from GitHub..."
-if ! curl -fsSL "$PROXY_URL" -o "${INSTALL_DIR}/proxy.py"; then
-    error "Failed to download proxy.py from ${PROXY_URL}"
+info "Downloading ${REPOSITORY}@${INSTALL_REF}..."
+if ! curl -fsSL "$ARCHIVE_URL" -o "$ARCHIVE_FILE"; then
+    error "Failed to download ${ARCHIVE_URL}"
     rollback
     exit 1
 fi
-chmod 0755 "${INSTALL_DIR}/proxy.py"
-PROXY_COPIED=true
-info "Installed proxy.py -> ${INSTALL_DIR}/proxy.py"
+
+if [[ -n "$EXPECTED_SHA256" ]]; then
+    ACTUAL_SHA256=$(sha256sum "$ARCHIVE_FILE" | awk '{print $1}')
+    if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+        error "Archive SHA-256 mismatch."
+        rollback
+        exit 1
+    fi
+    info "Archive SHA-256 verified"
+else
+    warn "OLLAMA_AGENT_PROXY_SHA256 is not set; archive checksum verification was skipped."
+fi
+
+if ! tar -xzf "$ARCHIVE_FILE" --strip-components=1 -C "$SOURCE_DIR"; then
+    error "Failed to extract release archive."
+    rollback
+    exit 1
+fi
+
+MANIFEST_SOURCE="${SOURCE_DIR}/install-manifest.txt"
+if [[ ! -f "$MANIFEST_SOURCE" ]]; then
+    error "install-manifest.txt is missing from the archive."
+    rollback
+    exit 1
+fi
+
+while IFS= read -r MANAGED_PATH || [[ -n "$MANAGED_PATH" ]]; do
+    [[ -z "$MANAGED_PATH" || "$MANAGED_PATH" == \#* ]] && continue
+    if [[ "$MANAGED_PATH" == /* || "$MANAGED_PATH" == *".."* ]]; then
+        error "Unsafe path in install-manifest.txt: ${MANAGED_PATH}"
+        rollback
+        exit 1
+    fi
+    if [[ ! -f "${SOURCE_DIR}/${MANAGED_PATH}" ]]; then
+        error "Required file is missing: ${MANAGED_PATH}"
+        rollback
+        exit 1
+    fi
+    mkdir -p "${STAGED_INSTALL}/$(dirname "$MANAGED_PATH")"
+    cp -f -- "${SOURCE_DIR}/${MANAGED_PATH}" "${STAGED_INSTALL}/${MANAGED_PATH}"
+done < "$MANIFEST_SOURCE"
+cp -f -- "$MANIFEST_SOURCE" "${STAGED_INSTALL}/install-manifest.txt"
+chmod 0755 "${STAGED_INSTALL}/proxy.py"
+
+if ! PYTHONPYCACHEPREFIX="${STAGE_ROOT}/pycache" python3 -m py_compile \
+    "${STAGED_INSTALL}/proxy.py" \
+    "${STAGED_INSTALL}/common.py" \
+    "${STAGED_INSTALL}/ollama.py" \
+    "${STAGED_INSTALL}/agents/__init__.py" \
+    "${STAGED_INSTALL}/agents/opencode.py" \
+    "${STAGED_INSTALL}/agents/codex.py" \
+    "${STAGED_INSTALL}/agents/claudecode.py"; then
+    error "Python syntax validation failed."
+    rollback
+    exit 1
+fi
+
+if ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$STAGED_INSTALL" python3 -c 'import proxy, common, ollama, agents'; then
+    error "Python import validation failed."
+    rollback
+    exit 1
+fi
+
+if [[ -d "$INSTALL_DIR" ]]; then
+    BACKUP_DIR="${INSTALL_DIR}.backup.$$"
+    mv -- "$INSTALL_DIR" "$BACKUP_DIR"
+fi
+mv -- "$STAGED_INSTALL" "$INSTALL_DIR"
+FILES_INSTALLED=true
+chmod 0755 "$INSTALL_DIR"
+info "Installed runtime files -> ${INSTALL_DIR}"
 
 # --- systemd service file ---
+if [[ -f "$SERVICE_FILE" ]]; then
+    SERVICE_BACKUP="${STAGE_ROOT}/service.backup"
+    cp -f -- "$SERVICE_FILE" "$SERVICE_BACKUP"
+fi
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Ollama Agent Proxy
@@ -291,6 +389,10 @@ SERVICE_CREATED=true
 info "Created service file -> ${SERVICE_FILE}"
 
 # --- drop-in override ---
+if [[ -d "$DROPIN_DIR" ]]; then
+    DROPIN_BACKUP="${STAGE_ROOT}/dropin.backup"
+    cp -a -- "$DROPIN_DIR" "$DROPIN_BACKUP"
+fi
 mkdir -p "$DROPIN_DIR"
 cat > "$DROPIN_FILE" <<EOF
 [Service]
@@ -328,6 +430,14 @@ if systemctl start "$SERVICE_NAME"; then
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         echo ""
         info "============================================"
+        if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
+            rm -rf -- "$BACKUP_DIR"
+            BACKUP_DIR=""
+        fi
+        if [[ -n "$STAGE_ROOT" && -d "$STAGE_ROOT" ]]; then
+            rm -rf -- "$STAGE_ROOT"
+            STAGE_ROOT=""
+        fi
         info "Installation complete!"
         info "============================================"
         echo ""
