@@ -14,7 +14,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.read_timeout, 21600)
         self.assertEqual(settings.max_request_bytes, 64 * 1024 * 1024)
         self.assertFalse(settings.ollama_think)
-        self.assertEqual(settings.anthropic_heartbeat_interval, 60)
+        self.assertEqual(settings.anthropic_heartbeat_interval, 15)
         self.assertFalse(settings.debug)
 
     def test_overrides_and_truthy_values(self):

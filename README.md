@@ -158,7 +158,7 @@ sudo ./uninstall.sh
 | `MAX_REQUEST_BYTES` | `/v1/responses` と `/v1/messages` で許容するリクエストボディの最大サイズ（バイト） | `67108864`（64MB） |
 | `OLLAMA_KEEP_ALIVE` | Ollama へのリクエストに付与する `keep_alive` 値。モデルのメモリ保持期間を制御します | `30m` |
 | `OLLAMA_THINK` | `false` / `true` または対応モデル向けの `low` / `medium` / `high`。不正値は起動エラーになります | `false` |
-| `ANTHROPIC_HEARTBEAT_INTERVAL` | Claude Code向けSSEで、Ollamaが無音の間に`ping`を送る間隔（秒）。0より大きく300未満 | `60` |
+| `ANTHROPIC_HEARTBEAT_INTERVAL` | Claude Code向けSSEで、Ollamaが無音の間に`ping`を送る間隔（秒）。0より大きく300未満 | `15` |
 | `DEBUG` | `1` / `true` / `yes` を設定すると、Ollama送信直前のメッセージ総数、各role・content型・文字数、system/developerの件数と位置をログへ出力します。本文は出力しません | 無効 |
 
 ### 内部接続動作
@@ -586,7 +586,7 @@ curl http://localhost:8000/v1/messages \
 
 Ollamaはprompt token数をstream終端で報告するため、`message_start.usage.input_tokens`は0で開始し、最終`message_delta.usage`で`prompt_eval_count`と`eval_count`に基づく累積input/output token数を通知します。
 
-Ollamaのmodel loadやprompt評価でupstreamのHTTP response自体がまだ開始していない間も、proxyは先にSSEを開始して`ping`を送ります。これによりcustom gatewayが300秒無通信になるClaude Codeのwatchdog条件を回避します。
+Ollamaのmodel loadやprompt評価でupstreamのHTTP response自体がまだ開始していない間も、proxyは先にSSEを開始して15秒間隔で`ping`を送ります。Ollama読取りは専用workerへ分離しますが、通常eventとpingのHTTP書込みはrequest handlerだけが行います。正常終了、上流例外、timeout、client切断時はupstream socketを閉じてreaderを回収します。これによりSSEの同時writeを避けながら、custom gatewayが無通信になるClaude Codeのwatchdog条件を回避します。
 
 Claude Codeから送られる`thinking`指定はOllamaへ直接転送しません。Ollamaのthinkingはサーバー側の`OLLAMA_THINK`だけで制御し、`message.thinking`はOpenCode、Codex、Claude Codeのすべてで破棄します。Anthropicの署名付きthinking blockには変換しません。thinkingのみが生成されて可視textもtool callもない場合は、thinking本文の代わりにproxy生成の短い診断文を返し、Claude Codeが無反応に見える状態を避けます。
 

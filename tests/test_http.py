@@ -4,6 +4,7 @@ import json
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
+from unittest.mock import Mock
 
 from ollama import OllamaConnectionError
 from proxy import Settings, configured_handler, message_layout_lines
@@ -12,6 +13,7 @@ from proxy import Settings, configured_handler, message_layout_lines
 class FakeClient:
     def __init__(self):
         self.requests = []
+        self.heartbeat_intervals = []
         self.fail = False
 
     def list_models(self):
@@ -72,6 +74,7 @@ class FakeClient:
     @contextmanager
     def stream_chat_with_heartbeat(self, body, *, heartbeat_interval):
         self.requests.append(body)
+        self.heartbeat_intervals.append(heartbeat_interval)
         if self.fail:
             raise OllamaConnectionError("offline")
         yield iter(
@@ -91,6 +94,19 @@ class FakeClient:
 
 
 class HTTPTests(unittest.TestCase):
+    def test_client_disconnect_exceptions_do_not_send_internal_error(self):
+        handler = object.__new__(configured_handler(Settings(), FakeClient()))
+        handler.send_json = Mock()
+
+        for exception in (BrokenPipeError(), ConnectionResetError()):
+            with self.subTest(exception=type(exception).__name__):
+                def disconnect(_request_no, error=exception):
+                    raise error
+
+                handler._dispatch("/v1/messages", disconnect)
+
+        handler.send_json.assert_not_called()
+
     def test_message_layout_diagnostics_do_not_include_content(self):
         lines = message_layout_lines(
             [
@@ -130,6 +146,7 @@ class HTTPTests(unittest.TestCase):
     def setUp(self):
         self.client.fail = False
         self.client.requests.clear()
+        self.client.heartbeat_intervals.clear()
 
     def request(self, method, path, body=None, headers=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
@@ -235,6 +252,9 @@ class HTTPTests(unittest.TestCase):
         self.assertIn(b"event: message_stop\n", raw)
         self.assertNotIn(b"private", raw)
         self.assertNotIn(b"[DONE]", raw)
+        self.assertEqual(self.client.heartbeat_intervals, [15])
+        message_stop = raw.index(b"event: message_stop\n")
+        self.assertNotIn(b"event: ping\n", raw[message_stop:])
 
     def test_messages_validation_and_upstream_error_shape(self):
         status, _, raw = self.request(

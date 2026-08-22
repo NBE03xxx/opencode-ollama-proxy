@@ -90,7 +90,7 @@ class Settings:
     max_request_bytes: int = 64 * 1024 * 1024
     ollama_keep_alive: str = "30m"
     ollama_think: bool | str = False
-    anthropic_heartbeat_interval: float = 60
+    anthropic_heartbeat_interval: float = 15
     debug: bool = False
 
     def __post_init__(self) -> None:
@@ -115,7 +115,7 @@ class Settings:
             ollama_keep_alive=os.environ.get("OLLAMA_KEEP_ALIVE", "30m"),
             ollama_think=parse_ollama_think(os.environ.get("OLLAMA_THINK", "0")),
             anthropic_heartbeat_interval=float(
-                os.environ.get("ANTHROPIC_HEARTBEAT_INTERVAL", "60")
+                os.environ.get("ANTHROPIC_HEARTBEAT_INTERVAL", "15")
             ),
             debug=os.environ.get("DEBUG", "").lower() in truthy,
         )

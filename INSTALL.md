@@ -66,4 +66,4 @@ sudo OLLAMA_AGENT_PROXY_VERSION=v1.0.0 \
 
 インストール中に `OLLAMA_HOST`、`LISTEN_HOST`、`LISTEN_PORT` を入力し、drop-inへ保存します。Ollamaが別ホストにある場合は `OLLAMA_HOST` にそのURLを指定します。
 
-`OLLAMA_THINK`（`false` / `true` / `low` / `medium` / `high`）と、Claude Code向け`ANTHROPIC_HEARTBEAT_INTERVAL`（デフォルト60秒）を変更する場合は、同じdrop-inへ追記します。heartbeatは0より大きく300未満にする必要があります。
+`OLLAMA_THINK`（`false` / `true` / `low` / `medium` / `high`）と、Claude Code向け`ANTHROPIC_HEARTBEAT_INTERVAL`（デフォルト15秒）を変更する場合は、同じdrop-inへ追記します。heartbeatは0より大きく300未満にする必要があります。
