@@ -77,10 +77,11 @@ def anthropic_messages_to_ollama(
     if not isinstance(messages, list):
         raise AnthropicRequestError("messages must be an array")
 
+    system_parts: list[str] = []
     converted: list[dict[str, Any]] = []
     system_text = _text_from_blocks(system)
     if system_text:
-        converted.append({"role": "system", "content": system_text})
+        system_parts.append(system_text)
 
     for message in messages:
         if not isinstance(message, dict):
@@ -92,7 +93,9 @@ def anthropic_messages_to_ollama(
             )
         content = message.get("content", "")
         if role in ("system", "developer"):
-            converted.append({"role": "system", "content": _text_from_blocks(content)})
+            system_text = _text_from_blocks(content)
+            if system_text:
+                system_parts.append(system_text)
             continue
         if isinstance(content, str):
             converted.append({"role": role, "content": content})
@@ -168,6 +171,11 @@ def anthropic_messages_to_ollama(
         converted.extend(tool_messages)
         if text_parts or not tool_messages:
             converted.append({"role": "user", "content": "".join(text_parts)})
+    if system_parts:
+        converted.insert(
+            0,
+            {"role": "system", "content": "\n\n".join(system_parts)},
+        )
     return converted
 
 

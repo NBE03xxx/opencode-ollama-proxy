@@ -34,6 +34,38 @@ from ollama import OllamaClient, OllamaConnectionError, OllamaError
 SERVER_NAME = "Ollama Agent Proxy v1.1"
 
 
+def message_layout_lines(messages: Any) -> list[str]:
+    """Return metadata-only diagnostics for an Ollama message sequence."""
+    if not isinstance(messages, list):
+        return [f"[Message Layout] messages_type={type(messages).__name__}"]
+    system_positions = []
+    developer_positions = []
+    lines = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            lines.append(f"{index}: message_type={type(message).__name__}")
+            continue
+        role = message.get("role", "")
+        if role == "system":
+            system_positions.append(index)
+        elif role == "developer":
+            developer_positions.append(index)
+        content = message.get("content")
+        length = len(normalize_content(content))
+        lines.append(
+            f"{index}: role={role}, content_type={type(content).__name__}, "
+            f"length={length}"
+        )
+    return [
+        f"[Message Layout] count={len(messages)}, "
+        f"system_count={len(system_positions)}, "
+        f"system_positions={system_positions}, "
+        f"developer_count={len(developer_positions)}, "
+        f"developer_positions={developer_positions}",
+        *lines,
+    ]
+
+
 def parse_ollama_think(value: str) -> bool | str:
     normalized = value.strip().lower()
     if normalized in ("", "0", "false", "no", "off"):
@@ -296,13 +328,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         print(f"stream = {bool(body.get('stream', False))}")
         if not self.config.debug or messages is None:
             return
-        for index, message in enumerate(messages):
-            role = message.get("role", "")
-            content = normalize_content(message.get("content"))
-            print(f"\n[{index}] {role} {len(content)} chars")
-            preview = content[:300] + ("..." if len(content) > 300 else "")
-            if preview:
-                print("    " + preview.replace("\n", " "))
+        print()
+        for line in message_layout_lines(messages):
+            print(line)
 
     @staticmethod
     def _error_details(exc: OllamaError) -> tuple[str, str]:

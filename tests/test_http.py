@@ -6,7 +6,7 @@ import unittest
 from http.server import ThreadingHTTPServer
 
 from ollama import OllamaConnectionError
-from proxy import Settings, configured_handler
+from proxy import Settings, configured_handler, message_layout_lines
 
 
 class FakeClient:
@@ -91,6 +91,25 @@ class FakeClient:
 
 
 class HTTPTests(unittest.TestCase):
+    def test_message_layout_diagnostics_do_not_include_content(self):
+        lines = message_layout_lines(
+            [
+                {"role": "system", "content": "top secret"},
+                {"role": "developer", "content": [{"type": "text", "text": "private"}]},
+                {"role": "user", "content": "hello"},
+            ]
+        )
+        rendered = "\n".join(lines)
+        self.assertIn("count=3", rendered)
+        self.assertIn("system_count=1", rendered)
+        self.assertIn("system_positions=[0]", rendered)
+        self.assertIn("developer_count=1", rendered)
+        self.assertIn("content_type=str", rendered)
+        self.assertIn("content_type=list", rendered)
+        self.assertIn("length=10", rendered)
+        self.assertNotIn("top secret", rendered)
+        self.assertNotIn("private", rendered)
+
     @classmethod
     def setUpClass(cls):
         cls.client = FakeClient()

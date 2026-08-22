@@ -14,6 +14,19 @@ def fixed_id(prefix, length):
 
 
 class ClaudeCodeTests(unittest.TestCase):
+    def assert_system_layout(self, messages):
+        system_indexes = [
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "system"
+        ]
+        self.assertLessEqual(len(system_indexes), 1)
+        if system_indexes:
+            self.assertEqual(system_indexes, [0])
+        self.assertFalse(
+            any(message.get("role") == "developer" for message in messages)
+        )
+
     def test_request_conversion_with_system_tools_and_options(self):
         model, stream, request = build_messages_request(
             {
@@ -80,16 +93,118 @@ class ClaudeCodeTests(unittest.TestCase):
                 {"role": "system", "content": "mid-conversation guidance"},
             ],
         )
-        self.assertEqual(messages[0]["content"], "checking")
-        self.assertEqual(messages[0]["tool_calls"][0]["id"], "toolu_1")
-        self.assertEqual(messages[1]["role"], "tool")
-        self.assertEqual(messages[1]["tool_call_id"], "toolu_1")
-        self.assertEqual(messages[2], {"role": "user", "content": "continue"})
         self.assertEqual(
-            messages[3],
+            messages[0],
             {"role": "system", "content": "mid-conversation guidance"},
         )
+        self.assertEqual(messages[1]["content"], "checking")
+        self.assertEqual(messages[1]["tool_calls"][0]["id"], "toolu_1")
+        self.assertEqual(messages[2]["role"], "tool")
+        self.assertEqual(messages[2]["tool_call_id"], "toolu_1")
+        self.assertEqual(messages[3], {"role": "user", "content": "continue"})
+        self.assert_system_layout(messages)
         self.assertNotIn("secret", str(messages))
+
+    def test_system_and_developer_messages_are_merged_at_the_front(self):
+        messages = anthropic_messages_to_ollama(
+            [
+                {"type": "text", "text": "base"},
+                {"type": "image", "source": {"type": "base64", "data": "secret"}},
+                {"type": "text", "text": " prompt"},
+            ],
+            [
+                {"role": "user", "content": "first"},
+                {"role": "system", "content": "extra"},
+                {
+                    "role": "developer",
+                    "content": [
+                        {"type": "text", "text": "developer"},
+                        {"type": "tool_result", "content": "ignored"},
+                    ],
+                },
+                {"role": "assistant", "content": "answer"},
+                {"role": "system", "content": "tail guidance"},
+                {"role": "system", "content": ""},
+                {"role": "developer", "content": []},
+            ],
+        )
+        self.assertEqual(
+            messages[0],
+            {
+                "role": "system",
+                "content": "base prompt\n\nextra\n\ndeveloper\n\ntail guidance",
+            },
+        )
+        self.assertEqual(
+            messages[1:],
+            [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "answer"},
+            ],
+        )
+        self.assert_system_layout(messages)
+        self.assertNotIn("secret", str(messages))
+
+    def test_single_string_system_and_conversation_order(self):
+        messages = anthropic_messages_to_ollama(
+            "system",
+            [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+                {"role": "user", "content": "three"},
+            ],
+        )
+        self.assertEqual(
+            messages,
+            [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+                {"role": "user", "content": "three"},
+            ],
+        )
+        self.assert_system_layout(messages)
+
+    def test_empty_or_missing_system_is_omitted(self):
+        for system in (None, "", [], [{"type": "text", "text": ""}]):
+            with self.subTest(system=system):
+                messages = anthropic_messages_to_ollama(
+                    system,
+                    [{"role": "user", "content": "hello"}],
+                )
+                self.assertEqual(messages, [{"role": "user", "content": "hello"}])
+                self.assert_system_layout(messages)
+
+    def test_claude_normal_mode_size_system_and_many_tools(self):
+        tools = [
+            {
+                "name": f"tool_{index}",
+                "description": "d" * 200,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                },
+            }
+            for index in range(24)
+        ]
+        _, _, request = build_messages_request(
+            {
+                "model": "qwen3.8:27b-Q6",
+                "max_tokens": 100,
+                "system": [
+                    {"type": "text", "text": "main-" + "x" * 20_000},
+                    {"type": "text", "text": "-memory-" + "y" * 10_000},
+                ],
+                "messages": [
+                    {"role": "developer", "content": "skill context"},
+                    {"role": "user", "content": "hello"},
+                ],
+                "tools": tools,
+            }
+        )
+        self.assert_system_layout(request["messages"])
+        self.assertEqual(request["messages"][1]["role"], "user")
+        self.assertEqual(len(request["tools"]), 24)
 
     def test_non_stream_response_hides_thinking_and_preserves_tool(self):
         response = message_from_ollama(

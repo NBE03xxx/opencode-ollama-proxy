@@ -159,7 +159,7 @@ sudo ./uninstall.sh
 | `OLLAMA_KEEP_ALIVE` | Ollama へのリクエストに付与する `keep_alive` 値。モデルのメモリ保持期間を制御します | `30m` |
 | `OLLAMA_THINK` | `false` / `true` または対応モデル向けの `low` / `medium` / `high`。不正値は起動エラーになります | `false` |
 | `ANTHROPIC_HEARTBEAT_INTERVAL` | Claude Code向けSSEで、Ollamaが無音の間に`ping`を送る間隔（秒）。0より大きく300未満 | `60` |
-| `DEBUG` | `1` / `true` / `yes` を設定すると、リクエストメッセージの役割、文字数、最大300文字のプレビューをログへ出力します | 無効 |
+| `DEBUG` | `1` / `true` / `yes` を設定すると、Ollama送信直前のメッセージ総数、各role・content型・文字数、system/developerの件数と位置をログへ出力します。本文は出力しません | 無効 |
 
 ### 内部接続動作
 
@@ -569,7 +569,7 @@ Responses 形式の `response` オブジェクトを返します。`output` 配�
 
 ### Messages API / Claude Code (`/v1/messages`)
 
-Claude Codeが送るAnthropic Messages APIのサブセットをOllamaへ変換します。`system`、text content block、`tools`、`tool_choice`、`tool_use`、`tool_result`、複数tool call、`max_tokens`、`stop_sequences`に対応します。
+Claude Codeが送るAnthropic Messages APIのサブセットをOllamaへ変換します。`system`、text content block、`tools`、`tool_choice`、`tool_use`、`tool_result`、複数tool call、`max_tokens`、`stop_sequences`に対応します。トップレベルの`system`と履歴内の`system` / `developer`は、空でないtext内容を出現順に連結し、Ollamaへ渡す履歴の先頭に単一の`system`メッセージとして配置します。
 
 ```bash
 curl http://localhost:8000/v1/messages \
