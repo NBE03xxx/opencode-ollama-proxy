@@ -1,12 +1,12 @@
 # Ollama Agent Proxy
 
-OpenCode と Codex から Ollama 上のローカル LLM を利用するための軽量な HTTP 変換プロキシです。
+OpenCode、Codex、Claude Code から Ollama 上のローカル LLM を利用するための軽量な HTTP 変換プロキシです。
 
-OpenCode 向けに OpenAI Chat Completions 互換 API、Codex 向けに OpenAI Responses API 互換 API を提供します。**Claude Code は未対応です。**
+OpenCode 向けに OpenAI Chat Completions 互換 API、Codex 向けに OpenAI Responses API 互換 API、Claude Code 向けに Anthropic Messages API 互換 API を提供します。
 
 ```text
-OpenCode / Codex
-   ↓ OpenAI 互換 API
+OpenCode / Codex / Claude Code
+   ↓ OpenAI / Anthropic 互換 API
 Ollama Agent Proxy
    ↓ Ollama native API
 Ollama
@@ -18,7 +18,7 @@ Local LLM
 
 OpenCode や Codex から Ollama を直接利用する場合、API の実装差異（tools / tool calling、thinking、リクエスト／レスポンス形式など）が問題となることがあります。
 
-このプロキシは、OpenCode と Codex が使用する OpenAI 互換 API のサブセットを Ollama の `/api/chat` 形式へ変換し、Ollama のレスポンスを各クライアント向けの形式へ変換して返します。すべての OpenAI API や OpenAI 互換クライアントに対する完全互換を目的としたものではありません。
+このプロキシは、各agentが使用する API のサブセットを Ollama の `/api/chat` 形式へ変換し、Ollama のレスポンスをクライアント固有の形式へ変換して返します。OpenAI APIまたはAnthropic APIの完全互換実装ではありません。
 
 **役割はあくまで API 変換・調整層です。** LLM 推論そのものを行うものではありません。
 
@@ -27,8 +27,8 @@ OpenCode や Codex から Ollama を直接利用する場合、API の実装差�
 ```text
 OpenCode ── POST /v1/chat/completions ──┐
                                         ├──> proxy.py
-Codex    ── POST /v1/responses ─────────┘      ├── agents/   API 形式変換
-                                               ├── ollama.py Ollama HTTP 通信
+Codex    ── POST /v1/responses ─────────┤      ├── agents/   API 形式変換
+Claude   ── POST /v1/messages ──────────┘      ├── ollama.py Ollama HTTP 通信
                                                └── common.py 共通処理
                                                       │
                                                       │ POST /api/chat
@@ -41,8 +41,9 @@ Codex    ── POST /v1/responses ─────────┘      ├──
 
 - OpenCode は `POST /v1/chat/completions`（OpenAI Chat Completions 互換）を使用
 - Codex は `POST /v1/responses`（OpenAI Responses API 互換）を使用
+- Claude Code は `POST /v1/messages`（Anthropic Messages API 互換）を使用
 - プロキシがリクエストを Ollama の `/api/chat` 形式へ変換して転送
-- Ollama のレスポンスをクライアントが使用した API 形式（Chat Completions / Responses）へ変換して返す
+- Ollama のレスポンスをクライアントが使用した API 形式（Chat Completions / Responses / Messages）へ変換して返す
 
 ### 対応状況
 
@@ -50,9 +51,7 @@ Codex    ── POST /v1/responses ─────────┘      ├──
 |-----------------|-----|------|
 | OpenCode | `POST /v1/chat/completions` | 対応 |
 | Codex | `POST /v1/responses` | 対応 |
-| Claude Code | Anthropic Messages API | **未対応** |
-
-`agents/claudecode.py` は将来の Claude Code 対応位置を示す空のプレースホルダーです。Claude Code 用のエンドポイント、Anthropic Messages API 変換、認証ヘッダー変換は実装されていません。
+| Claude Code | `POST /v1/messages` | 対応 |
 
 ## Features
 
@@ -60,18 +59,19 @@ Codex    ── POST /v1/responses ─────────┘      ├──
 |------|------|
 | `POST /v1/chat/completions` | OpenCode 向けの OpenAI Chat Completions 互換エンドポイント（`max_tokens` / `tool_choice` / `tools` に対応） |
 | `POST /v1/responses` | Codex 向けの OpenAI Responses API 互換エンドポイント。`input` / `instructions` / フラット形式の `tools` / `function_call` / `function_call_output` を受け付け、Responses 形式のレスポンス（および SSE イベント）を返す |
+| `POST /v1/messages` | Claude Code 向け Anthropic Messages API 互換エンドポイント。text、client tool、tool result、named SSE に対応 |
 | `GET /v1/models` | Ollama の `/api/tags` からモデル一覧を OpenAI 形式で返す |
 | `GET /health` / `GET /v1/health` | ヘルスチェック（`{"status":"ok"}` を返す） |
-| Streaming (SSE) | `stream: true` を指定すると Server-Sent Events でストリーミング応答（Chat Completions は `chat.completion.chunk`、Responses は `response.*` イベント系列） |
-| Tool calling | OpenAI 形式 ⇔ Ollama 形式の tool call 双方向変換（Chat Completions と Responses の両形式に対応） |
-| Thinking 制御 | Ollama リクエストに `think` フラグを設定。環境変数 `OLLAMA_THINK` で ON/OFF を切り替え可能（デフォルトは OFF） |
+| Streaming (SSE) | Chat Completions、Responses、Anthropic Messages の各wire formatでストリーミング応答 |
+| Tool calling | OpenAI / Anthropic形式とOllama形式のclient tool callを双方向変換 |
+| Thinking 制御 | `OLLAMA_THINK` で `false` / `true` / `low` / `medium` / `high` を指定。thinking本文は全クライアントで非公開 |
 | `max_tokens` / `max_output_tokens` 変換 | Chat Completions の `max_tokens`、Responses の `max_output_tokens` を Ollama の `options.num_predict` に変換 |
 | Content 正規化 | Chat Completions の `text` part、Responses の `input_text` / `output_text` / `text` part をプレーンテキストに正規化 |
 | ThreadingHTTPServer | 複数リクエストの同時処理に対応 |
 | タイムアウト設定 | 応答受信タイムアウト（6時間）やストリーミングアイドルタイムアウト（10分）を環境変数で設定可能 |
 | Nginx 対応 | `X-Accel-Buffering: no` ヘッダを送出し、リバースプロキシ環境でもストリーミングが機能するよう配慮 |
 | 環境変数設定 | 接続先・待ち受け先・タイムアウト・リクエストサイズ上限などを環境変数で柔軟に設定可能 |
-| Responses リクエストサイズ制限 | `/v1/responses` のリクエストボディが上限（デフォルト 64MB）を超える場合は `413 Request Entity Too Large` を返す |
+| リクエストサイズ制限 | `/v1/responses` と `/v1/messages` のリクエストボディが上限（デフォルト 64MB）を超える場合は `413 Request Entity Too Large` を返す |
 
 ## Requirements
 
@@ -79,7 +79,7 @@ Codex    ── POST /v1/responses ─────────┘      ├──
 
 - Python 3.10 以上
 - Ollama（起動済み）
-- OpenCode または Codex
+- OpenCode、Codex、Claude Codeのいずれか
 
 ランタイムは Python 標準ライブラリだけで動作します。
 
@@ -155,9 +155,10 @@ sudo ./uninstall.sh
 | `CONNECT_TIMEOUT` | Ollama への接続確立タイムアウト（秒） | `30` |
 | `READ_TIMEOUT` | Ollama からの応答受信タイムアウト（秒） | `21600`（6時間） |
 | `STREAM_IDLE_TIMEOUT` | Responses API ストリーミング時のアイドルタイムアウト（秒）。この間応答が止まると、ストリームをタイムアウトとして終了します | `600`（10分） |
-| `MAX_REQUEST_BYTES` | `/v1/responses` で許容するリクエストボディの最大サイズ（バイト）。超過すると `413` を返します | `67108864`（64MB） |
+| `MAX_REQUEST_BYTES` | `/v1/responses` と `/v1/messages` で許容するリクエストボディの最大サイズ（バイト） | `67108864`（64MB） |
 | `OLLAMA_KEEP_ALIVE` | Ollama へのリクエストに付与する `keep_alive` 値。モデルのメモリ保持期間を制御します | `30m` |
-| `OLLAMA_THINK` | `1` / `true` / `yes` を設定すると Ollama に `think: true` を送信し、思考モードを有効にします。それ以外は `think: false` | 無効（`think: false`） |
+| `OLLAMA_THINK` | `false` / `true` または対応モデル向けの `low` / `medium` / `high`。不正値は起動エラーになります | `false` |
+| `ANTHROPIC_HEARTBEAT_INTERVAL` | Claude Code向けSSEで、Ollamaが無音の間に`ping`を送る間隔（秒）。0より大きく300未満 | `60` |
 | `DEBUG` | `1` / `true` / `yes` を設定すると、リクエストメッセージの役割、文字数、最大300文字のプレビューをログへ出力します | 無効 |
 
 ### 内部接続動作
@@ -171,6 +172,7 @@ sudo ./uninstall.sh
 - `CONNECT_TIMEOUT`：Ollama への接続確立タイムアウト
 - `READ_TIMEOUT`：Ollama からの応答受信タイムアウト。長文生成や大規模な tool calling 処理に対応するため、デフォルトは比較的大きな値です
 - `STREAM_IDLE_TIMEOUT`：Responses API のストリーミング応答中に、Ollama からこの時間何も受信できなかった場合にストリームをタイムアウトとして終了させます
+- `ANTHROPIC_HEARTBEAT_INTERVAL`：Claude Codeの300秒watchdogより短い間隔でSSE `ping`を送り、長いthinking中の切断を防ぎます
 
 ## Running
 
@@ -192,7 +194,7 @@ OLLAMA_HOST=http://localhost:11434 LISTEN_PORT=8000 python3 proxy.py
 ======================================================================
 Ollama Agent Proxy
 ======================================================================
-Server : Ollama Agent Proxy (OpenAI-compatible) v1.0
+Server : Ollama Agent Proxy v1.1
 Listen : http://0.0.0.0:8000
 Ollama : http://127.0.0.1:11434/api/chat
 ======================================================================
@@ -200,16 +202,33 @@ Ollama : http://127.0.0.1:11434/api/chat
 
 ## Agent Configuration
 
-プロキシをデフォルト設定で起動した場合、OpenAI 互換 API のベース URL は `http://localhost:8000/v1` です。各エージェントでは、次の API を使用するよう設定してください。
+プロキシをデフォルト設定で起動した場合、各agentでは次の接続先を使用します。
 
 | AI エージェント | ベース URL | 使用する API |
 |-----------------|------------|--------------|
 | OpenCode | `http://localhost:8000/v1` | Chat Completions (`/chat/completions`) |
 | Codex | `http://localhost:8000/v1` | Responses API (`/responses`) |
+| Claude Code | `http://localhost:8000` | Anthropic Messages API (`/v1/messages`) |
 
-具体的な設定ファイル名や設定キーはエージェントのバージョンによって異なるため、利用中の OpenCode / Codex の設定方法に従ってください。このプロキシ自身は API キーを検証しません。
+具体的な設定ファイル名や設定キーはagentのバージョンによって異なります。このプロキシ自身は API キーを検証しません。
 
-Claude Code が使用する Anthropic Messages API は提供していないため、Claude Code の接続先としては使用できません。
+Claude Code CLI の例：
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8000
+export ANTHROPIC_AUTH_TOKEN=ollama-agent-proxy
+export ANTHROPIC_MODEL=qwen3.6:27b-Q6
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3.6:27b-Q6
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072
+export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+export CLAUDE_CODE_ATTRIBUTION_HEADER=0
+export ENABLE_TOOL_SEARCH=false
+claude
+```
+
+`ANTHROPIC_AUTH_TOKEN` はClaude Codeがgateway credentialとして送りますが、このproxyは値を検証しません。公開ネットワークでは認証reverse proxyとTLSを追加してください。Ollamaモデル名はClaude Codeの標準model pickerに出ない場合があるため、`ANTHROPIC_MODEL`またはsettingsの`model`で明示します。
+
+このproxyはClaude Codeのsystem blockをOllama向けに統合するため、`CLAUDE_CODE_ATTRIBUTION_HEADER=0`でgateway attribution blockを省くことを推奨します。また、custom `ANTHROPIC_BASE_URL`ではTool Searchは通常upfront loadingへfallbackしますが、利用者設定による強制有効化を避けるため`ENABLE_TOOL_SEARCH=false`を推奨します。`CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`だけではadaptive thinkingや明示的に有効化されたTool Searchを抑止できません。
 
 ## systemd Setup
 
@@ -290,8 +309,10 @@ journalctl -u ollama-agent-proxy -f
 |--------|------|------|
 | `POST` | `/v1/chat/completions` | OpenCode 向け OpenAI Chat Completions（非ストリーム・ストリーム両対応） |
 | `POST` | `/v1/responses` | Codex 向け OpenAI Responses API（非ストリーム・ストリーム両対応） |
+| `POST` | `/v1/messages` | Claude Code向けAnthropic Messages API（非ストリーム・named SSE対応） |
 | `GET` | `/v1/models` | Ollama のモデル一覧（OpenAI 形式） |
 | `GET` | `/health` ・ `/v1/health` | ヘルスチェック |
+| `HEAD` | `/api/hello` | Claude Codeの接続ウォームアップ |
 
 その他のパスへのリクエストは `404 Not Found` で返ります。
 
@@ -546,6 +567,39 @@ Responses 形式の `response` オブジェクトを返します。`output` 配�
 
 > **重要**：Codex CLI はツール呼び出しを `response.completed` の `output` から読み取ります。そのため、ストリーミングであっても `response.completed` に `output` を含めて送信します（`output: []` にしない）。
 
+### Messages API / Claude Code (`/v1/messages`)
+
+Claude Codeが送るAnthropic Messages APIのサブセットをOllamaへ変換します。`system`、text content block、`tools`、`tool_choice`、`tool_use`、`tool_result`、複数tool call、`max_tokens`、`stop_sequences`に対応します。
+
+```bash
+curl http://localhost:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "qwen3.6:27b-Q6",
+    "max_tokens": 1024,
+    "messages": [{"role":"user","content":"READMEを要約してください"}]
+  }'
+```
+
+ストリーミングではAnthropicのnamed SSEを返します。基本系列は`message_start`、content block events、`message_delta`、`message_stop`であり、OpenAI形式の`data: [DONE]`は送りません。Ollamaから応答がない間は`ping`を送ります。
+
+Ollamaはprompt token数をstream終端で報告するため、`message_start.usage.input_tokens`は0で開始し、最終`message_delta.usage`で`prompt_eval_count`と`eval_count`に基づく累積input/output token数を通知します。
+
+Ollamaのmodel loadやprompt評価でupstreamのHTTP response自体がまだ開始していない間も、proxyは先にSSEを開始して`ping`を送ります。これによりcustom gatewayが300秒無通信になるClaude Codeのwatchdog条件を回避します。
+
+Claude Codeから送られる`thinking`指定はOllamaへ直接転送しません。Ollamaのthinkingはサーバー側の`OLLAMA_THINK`だけで制御し、`message.thinking`はOpenCode、Codex、Claude Codeのすべてで破棄します。Anthropicの署名付きthinking blockには変換しません。thinkingのみが生成されて可視textもtool callもない場合は、thinking本文の代わりにproxy生成の短い診断文を返し、Claude Codeが無反応に見える状態を避けます。
+
+`POST /v1/messages/count_tokens`は未実装で、Anthropic形式の`404 not_found_error`を返します。Claude Codeは推論endpointを利用する方式へフォールバックしますが、追加の推論requestを消費します。image、document、server-side tool、prompt caching、Anthropic固有beta機能は初期対応範囲外です。
+
+### Claude Code / Ollamaの既知制約
+
+- Claude Codeでcustom `ANTHROPIC_BASE_URL`を使うと、Remote Controlが無効になる版があります。fast modeの可用性確認やWebFetchのdomain safety確認など、一部通信はgatewayを通らず`api.anthropic.com`へ直接送られます
+- Auto permission modeのsafety classifier requestもgatewayへ届く版があり、その判定は指定したOllama modelの能力に依存します。Anthropic側のclassifierが実行されるとは限りません
+- `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`でもadaptive thinkingは残ります。本proxyはそのfieldを無視し、Ollama側thinkingは`OLLAMA_THINK`だけで決定します
+- 一部のQwen系modelでは、tool-call-only assistant履歴の空contentや不完全なtool markupにより、Ollamaがtool callを通常textとして返す問題が報告されています。本proxyは安全性のため通常textを推測でtool callへ変換せず、Ollamaが返す構造化`message.tool_calls`だけを使用します
+- `ENABLE_TOOL_SEARCH=true`などでTool Searchを強制すると、local model／proxyが完全対応していない`tool_reference` blockが使われる可能性があります。初期構成では`ENABLE_TOOL_SEARCH=false`を推奨します
+
 ### Model specification
 
 モデルはプロキシの設定では固定せず、API リクエストの `model` フィールドで指定します。Ollama で読み込み済みの任意のモデル名を指定できます：
@@ -559,10 +613,10 @@ Responses 形式の `response` オブジェクトを返します。`output` 配�
 ## Limitations
 
 - **特定 API 挙動への依存**：Ollama の `/api/chat` の特定のレスポンス形式を前提としています
-- **対応クライアント**：対象は OpenCode と Codex です。その他の OpenAI 互換 API クライアントで完全な動作を保証するものではありません
-- **Claude Code 未対応**：Anthropic Messages API と Claude Code 固有の処理は実装されていません。`agents/claudecode.py` は将来対応用のプレースホルダーです
+- **対応クライアント**：対象は OpenCode、Codex、Claude Code CLIです。その他のOpenAI／Anthropic互換クライアントで完全な動作を保証するものではありません
+- **Messages APIの範囲**：Claude Codeのclient tool loopに必要なサブセットを対象とし、token counting、image/document、server-side tool、prompt caching、署名付きthinkingは未対応です
 - **認証機能なし**：認証、アクセス制御、TLS 終端は提供しません。プロキシは内部ネットワークでの利用を想定しています
-- **リクエストサイズ制限**：`/v1/responses` のリクエストボディはデフォルトで 64MB（`MAX_REQUEST_BYTES` で変更可能）までです。現時点では `/v1/chat/completions` にこの制限は適用されません
+- **リクエストサイズ制限**：`/v1/responses` と `/v1/messages` はデフォルトで64MBまでです。`/v1/chat/completions`には適用されません
 - **`tool_choice` の制約**：`required` によるツール呼び出し強制は Ollama 側に渡されません（モデルの判断に委ねられます）
 - **推論環境への依存**：推論性能や GPU 利用状況は Ollama、モデル、GPU、ドライバの環境に依存します
 
@@ -572,7 +626,7 @@ Responses 形式の `response` オブジェクトを返します。`output` 配�
 
 | コンポーネント | 値 |
 |---------------|-----|
-| クライアント | OpenCode、Codex CLI |
+| クライアント | OpenCode、Codex CLI、Claude Code CLI（実CLIスモークテストおよびprotocol自動テスト） |
 | バックエンド | Ollama |
 | モデル | Qwen3.6:27B-Q6 |
 | OS | Linux |
@@ -582,7 +636,7 @@ Responses 形式の `response` オブジェクトを返します。`output` 配�
 
 ## Background
 
-このプロキシは、ローカル AI コーディングエージェント環境の検証プロジェクトから生まれました。OpenCode から Ollama を直接利用する構成で API 実装差異に起因する問題が発生したため、中間層として開発し、その後 Codex の Responses API にも対応しました。現在は OpenCode / Codex 向けの独立した API 変換プロキシとして公開しています。
+このプロキシは、ローカル AI コーディングエージェント環境の検証プロジェクトから生まれました。OpenCode から Ollama を直接利用する構成で API 実装差異に起因する問題が発生したため中間層として開発し、その後 Codex の Responses API と Claude Code の Messages API に対応しました。
 
 ## License
 

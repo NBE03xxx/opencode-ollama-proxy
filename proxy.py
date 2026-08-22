@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenAI-compatible HTTP boundary for an Ollama server."""
+"""Agent API compatibility boundary for an Ollama server."""
 
 from dataclasses import dataclass
 import json
@@ -12,11 +12,17 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from agents import (
+    AnthropicRequestError,
+    anthropic_error,
     build_chat_request,
+    build_messages_request,
     build_responses_request,
     chat_completion_from_ollama,
     chat_stream_events,
     models_from_ollama,
+    message_from_ollama,
+    messages_failure_event,
+    messages_stream_events,
     responses_failure_events,
     responses_from_ollama,
     responses_stream_events,
@@ -25,7 +31,20 @@ from common import StreamEvent, json_bytes, normalize_content, openai_error
 from ollama import OllamaClient, OllamaConnectionError, OllamaError
 
 
-SERVER_NAME = "Ollama Agent Proxy (OpenAI-compatible) v1.0"
+SERVER_NAME = "Ollama Agent Proxy v1.1"
+
+
+def parse_ollama_think(value: str) -> bool | str:
+    normalized = value.strip().lower()
+    if normalized in ("", "0", "false", "no", "off"):
+        return False
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("low", "medium", "high"):
+        return normalized
+    raise ValueError(
+        "OLLAMA_THINK must be false, true, low, medium, or high"
+    )
 
 
 @dataclass(frozen=True)
@@ -38,8 +57,15 @@ class Settings:
     stream_idle_timeout: float = 600
     max_request_bytes: int = 64 * 1024 * 1024
     ollama_keep_alive: str = "30m"
-    ollama_think: bool = False
+    ollama_think: bool | str = False
+    anthropic_heartbeat_interval: float = 60
     debug: bool = False
+
+    def __post_init__(self) -> None:
+        if not 0 < self.anthropic_heartbeat_interval < 300:
+            raise ValueError(
+                "ANTHROPIC_HEARTBEAT_INTERVAL must be greater than 0 and less than 300"
+            )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -55,7 +81,10 @@ class Settings:
                 os.environ.get("MAX_REQUEST_BYTES", str(64 * 1024 * 1024))
             ),
             ollama_keep_alive=os.environ.get("OLLAMA_KEEP_ALIVE", "30m"),
-            ollama_think=os.environ.get("OLLAMA_THINK", "0").lower() in truthy,
+            ollama_think=parse_ollama_think(os.environ.get("OLLAMA_THINK", "0")),
+            anthropic_heartbeat_interval=float(
+                os.environ.get("ANTHROPIC_HEARTBEAT_INTERVAL", "60")
+            ),
             debug=os.environ.get("DEBUG", "").lower() in truthy,
         )
 
@@ -121,7 +150,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self._response_started = True
 
-    def send_sse(self, payload: dict[str, Any]) -> None:
+    def send_sse(self, payload: dict[str, Any], event: str | None = None) -> None:
+        if event:
+            self.wfile.write(b"event: " + event.encode("utf-8") + b"\n")
         self.wfile.write(b"data: " + json_bytes(payload) + b"\n\n")
         self.wfile.flush()
 
@@ -134,15 +165,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(json_bytes(payload))
         self.wfile.flush()
 
-    def send_events(self, events: Iterable[StreamEvent]) -> None:
+    def send_events(
+        self,
+        events: Iterable[StreamEvent],
+        *,
+        done_marker: bool = True,
+    ) -> None:
         iterator = iter(events)
         try:
             for event in iterator:
                 if event.terminal:
-                    self.send_done()
+                    if done_marker:
+                        self.send_done()
                     break
                 if event.payload is not None:
-                    self.send_sse(event.payload)
+                    self.send_sse(event.payload, event.event)
         finally:
             close = getattr(iterator, "close", None)
             if close is not None:
@@ -154,8 +191,31 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._dispatch(path, self.handle_chat_completion)
         elif path == "/v1/responses":
             self._dispatch(path, self.handle_responses)
+        elif path == "/v1/messages":
+            self._dispatch(path, self.handle_messages)
+        elif path == "/v1/messages/count_tokens":
+            self.send_json(
+                404,
+                anthropic_error(
+                    "Token counting is not implemented",
+                    "not_found_error",
+                ),
+            )
         else:
             self.send_json(404, openai_error("Not found", "not_found"))
+
+    def do_HEAD(self) -> None:
+        path = urlparse(self.path).path
+        if path == "/api/hello":
+            self.send_response(200)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self._response_started = True
+        else:
+            self.send_response(404)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self._response_started = True
 
     def _dispatch(self, path: str, handler) -> None:
         request_no = self.next_request_number()
@@ -174,7 +234,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             traceback.print_exc()
             if not self._response_started:
                 try:
-                    self.send_json(500, openai_error("Internal proxy error", "proxy_error"))
+                    if path == "/v1/messages":
+                        error = anthropic_error("Internal proxy error", "api_error")
+                    else:
+                        error = openai_error("Internal proxy error", "proxy_error")
+                    self.send_json(500, error)
                 except Exception:
                     pass
 
@@ -194,7 +258,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             print(f"[ERROR] /v1/models: {exc}")
             self.send_json(502, openai_error(str(exc), "upstream_error"))
 
-    def _read_json_body(self, *, enforce_limit: bool) -> dict[str, Any] | None:
+    def _read_json_body(
+        self,
+        *,
+        enforce_limit: bool,
+        error_factory=openai_error,
+        too_large_type: str = "invalid_request_error",
+    ) -> dict[str, Any] | None:
         if enforce_limit:
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
@@ -203,7 +273,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if content_length < 0 or content_length > self.config.max_request_bytes:
                 self.send_json(
                     413,
-                    openai_error("Request body is too large", "invalid_request_error"),
+                    error_factory("Request body is too large", too_large_type),
                 )
                 return None
         else:
@@ -214,7 +284,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.send_json(
                 400,
-                openai_error(f"Invalid JSON: {exc}", "invalid_request_error"),
+                error_factory(f"Invalid JSON: {exc}", "invalid_request_error"),
             )
             return None
         return body
@@ -258,6 +328,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_events(responses_failure_events(model, error_type, message))
         else:
             self.send_json(502, openai_error(message, error_type))
+
+    def _send_messages_upstream_error(self, stream: bool, exc: Exception) -> None:
+        message = str(exc) or "Ollama request failed"
+        if stream:
+            if not self._response_started:
+                self.send_sse_headers()
+            self.send_sse(
+                anthropic_error(message, "api_error"),
+                "error",
+            )
+        else:
+            self.send_json(502, anthropic_error(message, "api_error"))
 
     def handle_chat_completion(self, request_no: int) -> None:
         body = self._read_json_body(enforce_limit=False)
@@ -324,6 +406,54 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self._send_responses_upstream_error(stream, model, exc)
         print(
             f"[Responses Complete] Request #{request_no} "
+            f"{time.monotonic() - start_time:.3f}s"
+        )
+
+    def handle_messages(self, request_no: int) -> None:
+        body = self._read_json_body(
+            enforce_limit=True,
+            error_factory=anthropic_error,
+            too_large_type="request_too_large",
+        )
+        if body is None:
+            return
+        try:
+            model, stream, ollama_body = build_messages_request(body)
+        except AnthropicRequestError as exc:
+            self.send_json(400, anthropic_error(str(exc), "invalid_request_error"))
+            return
+
+        self._log_request("Messages", body, ollama_body.get("messages", []))
+        start_time = time.monotonic()
+        try:
+            if stream:
+                with self.client.stream_chat_with_heartbeat(
+                    ollama_body,
+                    heartbeat_interval=self.config.anthropic_heartbeat_interval,
+                ) as items:
+                    self.send_sse_headers()
+                    try:
+                        self.send_events(
+                            messages_stream_events(items, model),
+                            done_marker=False,
+                        )
+                    except (BrokenPipeError, ConnectionResetError):
+                        raise
+                    except Exception as exc:
+                        print(f"[ERROR] Messages streaming exception: {exc}")
+                        self.send_sse(
+                            anthropic_error(str(exc) or "Streaming failed", "api_error"),
+                            "error",
+                        )
+            else:
+                response = message_from_ollama(self.client.chat(ollama_body), model)
+                self.send_json(200, response)
+        except OllamaError as exc:
+            print(f"[ERROR] Ollama request: {exc}")
+            if not self._response_started:
+                self._send_messages_upstream_error(stream, exc)
+        print(
+            f"[Messages Complete] Request #{request_no} "
             f"{time.monotonic() - start_time:.3f}s"
         )
 

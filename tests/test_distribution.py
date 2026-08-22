@@ -32,6 +32,7 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(len(paths), len(set(paths)))
         self.assertIn("proxy.py", paths)
         self.assertIn("agents/codex.py", paths)
+        self.assertIn("agents/claudecode.py", paths)
 
 
 if __name__ == "__main__":

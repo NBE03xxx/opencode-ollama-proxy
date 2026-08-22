@@ -59,6 +59,7 @@ class CodexTests(unittest.TestCase):
         response = responses_from_ollama(
             {
                 "message": {
+                    "thinking": "private chain",
                     "content": "answer",
                     "tool_calls": [
                         {"id": "call_1", "function": {"name": "f", "arguments": {"x": 1}}}
@@ -74,6 +75,7 @@ class CodexTests(unittest.TestCase):
         self.assertEqual([item["type"] for item in response["output"]], ["message", "function_call"])
         self.assertEqual(response["output"][1]["call_id"], "call_1")
         self.assertEqual(response["usage"]["total_tokens"], 5)
+        self.assertNotIn("private chain", str(response))
 
     def test_stream_sequence_and_final_output(self):
         fixture = Path(__file__).with_name("fixtures") / "responses_stream.ndjson"

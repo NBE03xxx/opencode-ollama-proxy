@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import unittest
 from urllib.error import URLError
 
@@ -24,14 +25,14 @@ class FakeResponse:
         self.closed = True
 
 
-def make_client(opener):
+def make_client(opener, *, think=False):
     return OllamaClient(
         "http://ollama.test/",
         connect_timeout=2,
         read_timeout=3,
         stream_idle_timeout=4,
         keep_alive="30m",
-        think=False,
+        think=think,
         opener=opener,
     )
 
@@ -68,6 +69,17 @@ class OllamaTests(unittest.TestCase):
         self.assertEqual(captured["timeout"], 3)
         self.assertTrue(response.closed)
 
+    def test_chat_preserves_thinking_level(self):
+        response = FakeResponse(b'{"message":{"content":"ok"}}')
+        captured = {}
+
+        def opener(request, timeout):
+            captured["body"] = json.loads(request.data.decode())
+            return response
+
+        make_client(opener, think="high").chat({"model": "m", "stream": False})
+        self.assertEqual(captured["body"]["think"], "high")
+
     def test_stream_closes_on_early_exit(self):
         response = FakeResponse(
             lines=[
@@ -77,6 +89,47 @@ class OllamaTests(unittest.TestCase):
         )
         with make_client(lambda request, timeout: response).stream_chat({"model": "m"}) as items:
             self.assertEqual(next(items)["message"]["content"], "a")
+        self.assertTrue(response.closed)
+
+    def test_heartbeat_stream_yields_during_silence(self):
+        class SlowResponse(FakeResponse):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def readline(self):
+                self.calls += 1
+                if self.calls == 1:
+                    time.sleep(0.04)
+                    return b'{"message":{"content":"a"}}\n'
+                return b""
+
+        response = SlowResponse()
+        with make_client(lambda request, timeout: response).stream_chat_with_heartbeat(
+            {"model": "m"}, heartbeat_interval=0.01
+        ) as items:
+            self.assertIsNone(next(items))
+            item = next(items)
+            while item is None:
+                item = next(items)
+            self.assertEqual(item["message"]["content"], "a")
+        self.assertTrue(response.closed)
+
+    def test_heartbeat_starts_before_upstream_open_completes(self):
+        response = FakeResponse(lines=[b'{"message":{},"done":true}\n'])
+
+        def slow_opener(request, timeout):
+            time.sleep(0.04)
+            return response
+
+        with make_client(slow_opener).stream_chat_with_heartbeat(
+            {"model": "m"}, heartbeat_interval=0.01
+        ) as items:
+            self.assertIsNone(next(items))
+            item = next(items)
+            while item is None:
+                item = next(items)
+            self.assertTrue(item["done"])
         self.assertTrue(response.closed)
 
     def test_invalid_json_and_skip_policy(self):

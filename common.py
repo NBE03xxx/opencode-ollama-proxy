@@ -10,6 +10,7 @@ class StreamEvent:
     """A transport-neutral event emitted by an agent adapter."""
 
     payload: Optional[dict[str, Any]] = None
+    event: Optional[str] = None
     terminal: bool = False
 
 

@@ -42,6 +42,7 @@ class OpenCodeTests(unittest.TestCase):
         response = chat_completion_from_ollama(
             {
                 "message": {
+                    "thinking": "private chain",
                     "content": "",
                     "tool_calls": [
                         {"function": {"name": "f", "arguments": {"x": 1}}}
@@ -63,6 +64,7 @@ class OpenCodeTests(unittest.TestCase):
             '{"x":1}',
         )
         self.assertEqual(response["usage"]["total_tokens"], 5)
+        self.assertNotIn("private chain", str(response))
 
     def test_stream_event_order_and_usage(self):
         fixture = Path(__file__).with_name("fixtures") / "chat_stream.ndjson"

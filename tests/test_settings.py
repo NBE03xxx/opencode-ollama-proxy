@@ -14,6 +14,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.read_timeout, 21600)
         self.assertEqual(settings.max_request_bytes, 64 * 1024 * 1024)
         self.assertFalse(settings.ollama_think)
+        self.assertEqual(settings.anthropic_heartbeat_interval, 60)
         self.assertFalse(settings.debug)
 
     def test_overrides_and_truthy_values(self):
@@ -44,6 +45,26 @@ class SettingsTests(unittest.TestCase):
         with patch.dict(os.environ, {"LISTEN_PORT": "bad"}, clear=True):
             with self.assertRaises(ValueError):
                 Settings.from_env()
+
+    def test_thinking_levels_and_invalid_value(self):
+        for level in ("low", "medium", "high"):
+            with self.subTest(level=level):
+                with patch.dict(os.environ, {"OLLAMA_THINK": level}, clear=True):
+                    self.assertEqual(Settings.from_env().ollama_think, level)
+        with patch.dict(os.environ, {"OLLAMA_THINK": "sometimes"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "OLLAMA_THINK"):
+                Settings.from_env()
+
+    def test_heartbeat_interval_bounds(self):
+        for value in ("0", "300"):
+            with self.subTest(value=value):
+                with patch.dict(
+                    os.environ,
+                    {"ANTHROPIC_HEARTBEAT_INTERVAL": value},
+                    clear=True,
+                ):
+                    with self.assertRaisesRegex(ValueError, "HEARTBEAT"):
+                        Settings.from_env()
 
 
 if __name__ == "__main__":

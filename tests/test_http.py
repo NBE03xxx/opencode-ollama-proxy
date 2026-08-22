@@ -23,6 +23,8 @@ class FakeClient:
         self.requests.append(body)
         if self.fail:
             raise OllamaConnectionError("offline")
+        if body.get("model") == "explode":
+            raise RuntimeError("unexpected")
         if body.get("model") == "tool-model":
             return {
                 "message": {
@@ -67,6 +69,26 @@ class FakeClient:
                 ]
             )
 
+    @contextmanager
+    def stream_chat_with_heartbeat(self, body, *, heartbeat_interval):
+        self.requests.append(body)
+        if self.fail:
+            raise OllamaConnectionError("offline")
+        yield iter(
+            [
+                None,
+                {"message": {"thinking": "private"}},
+                {"message": {"content": "hello"}},
+                {
+                    "message": {},
+                    "done": True,
+                    "prompt_eval_count": 2,
+                    "eval_count": 1,
+                    "done_reason": "stop",
+                },
+            ]
+        )
+
 
 class HTTPTests(unittest.TestCase):
     @classmethod
@@ -110,6 +132,10 @@ class HTTPTests(unittest.TestCase):
         status, _, raw = self.request("GET", "/missing")
         self.assertEqual(status, 404)
         self.assertEqual(json.loads(raw)["error"]["type"], "not_found")
+
+        status, _, raw = self.request("HEAD", "/api/hello")
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, b"")
 
     def test_models(self):
         status, _, raw = self.request("GET", "/v1/models")
@@ -165,6 +191,84 @@ class HTTPTests(unittest.TestCase):
         self.assertIn(b'"type":"response.created"', raw)
         self.assertIn(b'"type":"response.completed"', raw)
         self.assertTrue(raw.endswith(b"data: [DONE]\n\n"))
+
+    def test_messages_non_stream_and_named_stream(self):
+        request = {
+            "model": "messages-model",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        status, _, raw = self.request("POST", "/v1/messages?beta=true", request)
+        self.assertEqual(status, 200)
+        payload = json.loads(raw)
+        self.assertEqual(payload["type"], "message")
+        self.assertEqual(payload["content"], [{"type": "text", "text": "hello"}])
+
+        status, headers, raw = self.request(
+            "POST",
+            "/v1/messages",
+            {**request, "stream": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "text/event-stream; charset=utf-8")
+        self.assertTrue(raw.startswith(b"event: message_start\n"))
+        self.assertIn(b"event: ping\n", raw)
+        self.assertIn(b"event: message_stop\n", raw)
+        self.assertNotIn(b"private", raw)
+        self.assertNotIn(b"[DONE]", raw)
+
+    def test_messages_validation_and_upstream_error_shape(self):
+        status, _, raw = self.request(
+            "POST",
+            "/v1/messages",
+            {"model": "m", "messages": []},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(raw)["type"], "error")
+        self.assertEqual(json.loads(raw)["error"]["type"], "invalid_request_error")
+
+        self.client.fail = True
+        status, _, raw = self.request(
+            "POST",
+            "/v1/messages",
+            {"model": "m", "max_tokens": 1, "messages": []},
+        )
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(raw)["type"], "error")
+        self.assertEqual(json.loads(raw)["error"]["type"], "api_error")
+
+        self.client.fail = False
+        status, _, raw = self.request(
+            "POST",
+            "/v1/messages",
+            b"x" * 129,
+            {"Content-Length": "129"},
+        )
+        self.assertEqual(status, 413)
+        self.assertEqual(json.loads(raw)["type"], "error")
+        self.assertEqual(json.loads(raw)["error"]["type"], "request_too_large")
+
+        status, _, raw = self.request(
+            "POST",
+            "/v1/messages/count_tokens?beta=true",
+            {"model": "m", "messages": []},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(raw)["type"], "error")
+        self.assertEqual(json.loads(raw)["error"]["type"], "not_found_error")
+
+        status, _, raw = self.request(
+            "POST",
+            "/v1/messages",
+            {
+                "model": "explode",
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        self.assertEqual(status, 500)
+        self.assertEqual(json.loads(raw)["type"], "error")
+        self.assertEqual(json.loads(raw)["error"]["type"], "api_error")
 
     def test_invalid_requests(self):
         status, _, raw = self.request(

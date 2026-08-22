@@ -2,7 +2,9 @@
 
 from contextlib import contextmanager
 import json
+from queue import Empty, Queue
 import socket
+import threading
 from typing import Any, Callable, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -38,7 +40,7 @@ class OllamaClient:
         read_timeout: float,
         stream_idle_timeout: float,
         keep_alive: str,
-        think: bool,
+        think: bool | str,
         opener: Callable[..., Any] = urlopen,
     ) -> None:
         self.host = host.rstrip("/")
@@ -134,6 +136,79 @@ class OllamaClient:
                 iterator.close()
             finally:
                 self._close(response)
+
+    @contextmanager
+    def stream_chat_with_heartbeat(
+        self,
+        body: dict[str, Any],
+        *,
+        heartbeat_interval: float,
+    ) -> Iterator[Iterator[dict[str, Any] | None]]:
+        """Read Ollama in a worker and yield None during silent intervals."""
+
+        request = Request(
+            self.chat_url,
+            data=json_bytes(self._request_body(body)),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/x-ndjson",
+            },
+            method="POST",
+        )
+        queue: Queue[tuple[str, Any]] = Queue()
+        stopped = threading.Event()
+        responses: list[Any] = []
+
+        def read_items() -> None:
+            response = None
+            try:
+                # Opening an Ollama stream can itself wait for model loading or
+                # prompt evaluation. Keep it in the worker so the HTTP handler
+                # can start Anthropic SSE and emit watchdog pings immediately.
+                response = self._open(request, self.read_timeout)
+                responses.append(response)
+                if stopped.is_set():
+                    return
+                for item in self._iter_ndjson(response, skip_invalid=False):
+                    if stopped.is_set():
+                        break
+                    queue.put(("item", item))
+            except BaseException as exc:
+                queue.put(("error", exc))
+            finally:
+                if response is not None:
+                    self._close(response)
+                queue.put(("done", None))
+
+        reader = threading.Thread(
+            target=read_items,
+            name="ollama-stream-reader",
+            daemon=True,
+        )
+        reader.start()
+
+        def items() -> Iterator[dict[str, Any] | None]:
+            while True:
+                try:
+                    kind, value = queue.get(timeout=heartbeat_interval)
+                except Empty:
+                    yield None
+                    continue
+                if kind == "item":
+                    yield value
+                elif kind == "error":
+                    raise value
+                else:
+                    break
+
+        iterator = items()
+        try:
+            yield iterator
+        finally:
+            stopped.set()
+            for response in responses:
+                self._close(response)
+            reader.join(timeout=min(heartbeat_interval, 1.0))
 
     def _set_stream_timeout(self, response: Any) -> None:
         sock = getattr(
